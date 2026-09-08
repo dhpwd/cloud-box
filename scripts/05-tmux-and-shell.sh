@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Step 8 – tmux, project sessions, kill switch. Runs as the box user.
+# Step 5 – tmux, project sessions, kill switch. Runs as the box user.
 set -euo pipefail
 
 # Synchronised output (DECSET 2026) landed in tmux 3.7. Without it Claude Code's
-# TUI flickers. 02-base.sh builds 3.7 from source because Debian 13 ships 3.5a.
+# TUI flickers. 01-base.sh builds 3.7 from source because Debian 13 ships 3.5a.
 V=$(tmux -V | grep -oE '[0-9]+\.[0-9]+')
 awk -v v="$V" 'BEGIN{ if (v+0 < 3.7) print "WARNING: tmux " v " < 3.7 – no synchronised output, the TUI will flicker" }'
 
@@ -56,8 +56,8 @@ tmux ls || true
 # stands in as a clipboard holder: boximg on the laptop pushes the Mac's
 # clipboard image into it over ssh, and the claude wrapper in ~/.bash_aliases
 # points DISPLAY at it – only there, so micro's clipboard and Playwright keep
-# behaving as they do now. Comes back at boot once 07-supervisor.sh has enabled
-# lingering. xvfb and xclip are installed by 02-base.sh.
+# behaving as they do now. Comes back at boot once 06-supervisor.sh has enabled
+# lingering. xvfb and xclip are installed by 01-base.sh.
 mkdir -p "$HOME/.config/systemd/user"
 cat > "$HOME/.config/systemd/user/xvfb-clipboard.service" <<'UNIT'
 [Unit]

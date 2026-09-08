@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Step 5 – clone the working set and install the agent config. Runs as dan on the box.
+# Step 3 – clone the working set and install the agent config. Runs as dan on the box.
 # Needs: `gh auth login` first – cloning goes through gh, so its HTTPS token is
 # enough and no SSH key needs to reach the box.
 set -euo pipefail
 
 GH_USER="${GH_USER:-dhpwd}"
-command -v gh >/dev/null || { echo "gh not installed – run 02-base.sh first" >&2; exit 1; }
+command -v gh >/dev/null || { echo "gh not installed – run 01-base.sh first" >&2; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "run 'gh auth login' first" >&2; exit 1; }
 WORKSPACE="$HOME/Workspace"
 mkdir -p "$WORKSPACE"
@@ -72,4 +72,4 @@ else
   echo "    !! no install.sh at $DOTFILES – install your agent config by hand"
 fi
 
-echo "==> Done. Next: 05-mcp.sh"
+echo "==> Done. Next: 04-mcp.sh"

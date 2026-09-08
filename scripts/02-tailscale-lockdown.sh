@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Step 3 – Tailscale, then close public SSH. Runs as root on the box.
+# Step 2 – Tailscale, then close public SSH. Runs as root on the box.
 # Provider note: written for a host with no cloud firewall in front of it, so
 # ufw is the whole firewall. If yours has one, mirror the rules there too.
 #
@@ -7,8 +7,8 @@
 # SSH works over the tailnet FROM ANOTHER DEVICE. Only then run phase 2, which
 # is the step that can lock you out.
 #
-#   ./03-tailscale-lockdown.sh up      # phase 1
-#   ./03-tailscale-lockdown.sh close   # phase 2 – after you have tested the tailnet
+#   ./02-tailscale-lockdown.sh up      # phase 1
+#   ./02-tailscale-lockdown.sh close   # phase 2 – after you have tested the tailnet
 set -euo pipefail
 
 BOX_USER="${BOX_USER:-dan}"

@@ -1,7 +1,7 @@
 # Laptop-side shell helpers. Source this from ~/.zshrc.
 #
 # The first section is the laptop's half of the cloud box: the box's own
-# helpers are written by scripts/cloud-box/06-tmux-and-shell.sh into
+# helpers are written by scripts/cloud-box/05-tmux-and-shell.sh into
 # ~/.bash_aliases. The second is file picking, which that script mirrors
 # for bash on the box.
 
@@ -52,7 +52,7 @@ boxtunnel() {
 # clipboard of the machine it runs on (xclip on Linux), and nothing between
 # Ghostty and tmux carries an image across, so it has to be sent first. The
 # box side is an Xvfb display that exists only to hold the selection, set up
-# by 06-tmux-and-shell.sh. Needs pngpaste from Homebrew. xclip forks to serve
+# by 05-tmux-and-shell.sh. Needs pngpaste from Homebrew. xclip forks to serve
 # the selection and would keep ssh waiting on its fds, hence the redirects.
 boximg() {
   local f

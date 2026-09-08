@@ -11,44 +11,44 @@ scripts/   the build, in order – run on the box
 shell/     laptop-side helpers (box, boximg, sweep) and the git and prompt config both machines share
 ```
 
-The tmux config, the box-side helpers (`t`, `sweep`, the `claude` wrapper) and the theme fix are written by `scripts/06-tmux-and-shell.sh`, so read that file for them. On the laptop, source `shell/laptop.zsh` from `~/.zshrc`, add `shell/gitconfig` as a global `include.path`, point `core.excludesFile` at `shell/gitignore` and symlink `shell/starship.toml` to `~/.config/starship.toml`. The helpers need `mosh`, `fzf`, `fd`, `bat`, `starship` and `pngpaste` from Homebrew.
+The tmux config, the box-side helpers (`t`, `sweep`, the `claude` wrapper) and the theme fix are written by `scripts/05-tmux-and-shell.sh`, so read that file for them. On the laptop, source `shell/laptop.zsh` from `~/.zshrc`, add `shell/gitconfig` as a global `include.path`, point `core.excludesFile` at `shell/gitignore` and symlink `shell/starship.toml` to `~/.config/starship.toml`. The helpers need `mosh`, `fzf`, `fd`, `bat`, `starship` and `pngpaste` from Homebrew.
 
-These are my real scripts with my identifiers swapped for placeholders, so expect to edit the repo list in `04-repos.sh`, the MCP server set in `05-mcp.sh` and the agent aliases in `06-tmux-and-shell.sh`. `BOX_USER` (default `dan`) is the non-root user the agents run as.
+These are my real scripts with my identifiers swapped for placeholders, so expect to edit the repo list in `03-repos.sh`, the MCP server set in `04-mcp.sh` and the agent aliases in `05-tmux-and-shell.sh`. `BOX_USER` (default `dan`) is the non-root user the agents run as.
 
 ## Order of operations
 
 Start from a fresh Debian 13 host with root SSH. Ordering the box itself is a manual checkout.
 
 ```
-laptop:  scp -r scripts root@<ip>:/root/ && ssh -t root@<ip> bash /root/scripts/02-base.sh
-box:     /root/scripts/03-tailscale-lockdown.sh up          # as root
+laptop:  scp -r scripts root@<ip>:/root/ && ssh -t root@<ip> bash /root/scripts/01-base.sh
+box:     /root/scripts/02-tailscale-lockdown.sh up          # as root
 laptop:  ssh <user>@<magicdns-name>                          # prove the tailnet works
-box:     /root/scripts/03-tailscale-lockdown.sh close       # keep the tested session open as a way back
+box:     /root/scripts/02-tailscale-lockdown.sh close       # keep the tested session open as a way back
 box:     git clone https://github.com/dhpwd/cloud-box && cd cloud-box/scripts   # as the user, from here on
-box:     ./04-repos.sh && ./05-mcp.sh && ./06-tmux-and-shell.sh && ./07-supervisor.sh
+box:     ./03-repos.sh && ./04-mcp.sh && ./05-tmux-and-shell.sh && ./06-supervisor.sh
 ```
 
 | Script                           | Runs on          | Needs you                                                            |
 | -------------------------------- | ---------------- | -------------------------------------------------------------------- |
-| `02-base.sh`                     | box, as root     | sets the user password interactively – needs `ssh -t`                |
-| `03-tailscale-lockdown.sh up`    | box, as root     | approve the machine in the Tailscale console                         |
-| `03-tailscale-lockdown.sh close` | box, as root     | confirms before closing public SSH                                   |
-| `04-repos.sh`                    | box, as the user | `gh auth login` first (HTTPS, no SSH key needed)                     |
-| `05-mcp.sh`                      | box, as the user | `OP_SERVICE_ACCOUNT_TOKEN`, a populated vault, OAuth redirect pastes |
-| `06-tmux-and-shell.sh`           | box, as the user | –                                                                    |
-| `07-supervisor.sh`               | box, as the user | –                                                                    |
+| `01-base.sh`                     | box, as root     | sets the user password interactively – needs `ssh -t`                |
+| `02-tailscale-lockdown.sh up`    | box, as root     | approve the machine in the Tailscale console                         |
+| `02-tailscale-lockdown.sh close` | box, as root     | confirms before closing public SSH                                   |
+| `03-repos.sh`                    | box, as the user | `gh auth login` first (HTTPS, no SSH key needed)                     |
+| `04-mcp.sh`                      | box, as the user | `OP_SERVICE_ACCOUNT_TOKEN`, a populated vault, OAuth redirect pastes |
+| `05-tmux-and-shell.sh`           | box, as the user | –                                                                    |
+| `06-supervisor.sh`               | box, as the user | –                                                                    |
 
-Between the scripts there is manual work with nothing to script: a 1Password vault holding every token the box needs plus a service account scoped to it (before `05`), `/login` for Claude Code and `codex login` (before `06`), and, on the phone, the Tailscale iOS app and then Termius with SSH and mosh both enabled.
+Between the scripts there is manual work with nothing to script: a 1Password vault holding every token the box needs plus a service account scoped to it (before `04`), `/login` for Claude Code and `codex login` (before `05`), and, on the phone, the Tailscale iOS app and then Termius with SSH and mosh both enabled.
 
-Two things the scripts fix that only showed up when running them: `op read` on an empty field exits 0, so `05-mcp.sh` tests the value it gets back, not the exit code. And Tailscale SSH is a separate listener that never consults sshd's config, so the sshd hardening in `03` constrains only the plain-SSH path – the control for Tailscale SSH is the tailnet policy. Split the default rule into your user on `accept` and `root` on `check` with a short `checkPeriod`.
+Two things the scripts fix that only showed up when running them: `op read` on an empty field exits 0, so `04-mcp.sh` tests the value it gets back, not the exit code. And Tailscale SSH is a separate listener that never consults sshd's config, so the sshd hardening in `02` constrains only the plain-SSH path – the control for Tailscale SSH is the tailnet policy. Split the default rule into your user on `accept` and `root` on `check` with a short `checkPeriod`.
 
 ## If you lock yourself out
 
-`03-tailscale-lockdown.sh close` is the only step that can. It arms a revert before it runs: unless a second prompt confirms a fresh connection worked, the whole change is undone after 300 seconds, so a wrong rule costs a five-minute wait rather than a trip to the provider's remote console. If it does come to that: delete `/etc/ssh/sshd_config.d/99-tailscale.conf` and run `ufw disable`.
+`02-tailscale-lockdown.sh close` is the only step that can. It arms a revert before it runs: unless a second prompt confirms a fresh connection worked, the whole change is undone after 300 seconds, so a wrong rule costs a five-minute wait rather than a trip to the provider's remote console. If it does come to that: delete `/etc/ssh/sshd_config.d/99-tailscale.conf` and run `ufw disable`.
 
 ## Secrets
 
-Nothing in this repo holds a secret value. `05-mcp.sh` reads every one from 1Password at run time via `op read` and `op document get`. The Typefully MCP server takes its key as a URL query parameter, so it ends up in the clear in `~/.claude.json`. Rotate it during the move and keep the new one in 1Password only.
+Nothing in this repo holds a secret value. `04-mcp.sh` reads every one from 1Password at run time via `op read` and `op document get`. The Typefully MCP server takes its key as a URL query parameter, so it ends up in the clear in `~/.claude.json`. Rotate it during the move and keep the new one in 1Password only.
 
 ## Licence
 

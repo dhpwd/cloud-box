@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Step 2 – base system. Runs as root on a fresh Debian 13 (trixie) box.
-# Needs a TTY for the user password prompt:  ssh -t root@<ip> bash /root/02-base.sh
+# Step 1 – base system. Runs as root on a fresh Debian 13 (trixie) box.
+# Needs a TTY for the user password prompt:  ssh -t root@<ip> bash /root/01-base.sh
 set -euo pipefail
 
 BOX_USER="${BOX_USER:-dan}"   # the non-root user agents run as
@@ -170,7 +170,7 @@ uv tool install pre-commit
 # Where a repo pins its own, npx and npm scripts still prefer node_modules.
 npm i -g hookdeck-cli prettier vercel
 # pnpm and bun, for the two repos whose lockfiles are not npm's: danhopwood.com
-# (pnpm) and fidero.com (bun). 04-repos.sh installs each repo's dependencies
+# (pnpm) and fidero.com (bun). 03-repos.sh installs each repo's dependencies
 # with the manager its lockfile names, so both must exist before it runs. bun's
 # installer lands in ~/.bun and edits ~/.bashrc only, so ~/.profile gets the
 # PATH line for login shells as well, like Go above.
@@ -183,4 +183,4 @@ if [ -n "${NEEDS_PASSWD:-}" ]; then
   echo
   echo "==> STILL TO DO: ssh -t root@<ip> passwd $BOX_USER"
 fi
-echo "==> Done. Next: 03-tailscale-lockdown.sh"
+echo "==> Done. Next: 02-tailscale-lockdown.sh"

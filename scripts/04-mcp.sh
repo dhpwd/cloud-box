@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Step 7 – re-add the MCP servers at user scope. Runs as the box user.
+# Step 4 – re-add the MCP servers at user scope. Runs as the box user.
 #
 # This is my server set, kept as a worked example – replace it with yours. The
 # part worth copying whatever your set is: s(), which tests the VALUE a secret
@@ -7,7 +7,7 @@
 #
 # Every secret is read from 1Password at run time. No values live in this repo.
 # Needs: OP_SERVICE_ACCOUNT_TOKEN exported, `op` CLI installed, vault `cloud-box`
-# populated (step 4 of the runbook).
+# populated (see the README).
 #
 # Not handled here, by design:
 #   claude.ai BigQuery + Google Drive – account-level connectors, they follow the

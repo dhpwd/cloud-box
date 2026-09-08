@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Step 9 – background-job supervisor across reboots. Runs as the box user.
+# Step 6 – background-job supervisor across reboots. Runs as the box user.
 #
 # `claude --bg` and `claude agents` run against a per-user daemon that outlives
 # the SSH session that started it. The daemon does not come back after a reboot,
@@ -18,7 +18,7 @@
 # – and if it does not, swap ExecStart for something that does.
 set -euo pipefail
 
-command -v claude >/dev/null || { echo "claude not on PATH – run step 6 first" >&2; exit 1; }
+command -v claude >/dev/null || { echo "claude not on PATH – install and /login Claude Code first" >&2; exit 1; }
 
 mkdir -p "$HOME/.config/systemd/user"
 
