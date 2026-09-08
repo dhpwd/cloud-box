@@ -1,0 +1,16 @@
+# Prompt for both machines. Symlink ~/.config/starship.toml here.
+# Starship defaults, except that git status carries counts: `main [!2 ⇡3]`
+# reads as two changed files and three commits nobody has pushed. Ahead and
+# behind are as of the last fetch – `sweep` does that across every repo.
+[git_status]
+ahead = "⇡${count}"
+behind = "⇣${count}"
+diverged = "⇡${ahead_count}⇣${behind_count}"
+modified = "!${count}"
+untracked = "?${count}"
+staged = "+${count}"
+
+# The gcloud module prints the active account and region in every prompt on
+# any machine with a gcloud config, which is all of them – off.
+[gcloud]
+disabled = true

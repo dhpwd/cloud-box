@@ -1,0 +1,4 @@
+# Global git ignore for both machines. Set core.excludesFile to this path. Repo-specific ignores belong in each repo's .gitignore.
+**/.claude/settings.local.json
+**/.claude/worktrees/
+.DS_Store

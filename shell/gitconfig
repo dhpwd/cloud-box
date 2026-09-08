@@ -1,0 +1,51 @@
+# Git settings shared by the laptop and the box. install.sh adds this file as
+# an include.path in the global config on both (git config --global --add
+# include.path <this file>), so a rebuild gets the same
+# behaviour. Machine-specific settings (credential helper, template directory)
+# stay in ~/.gitconfig itself.
+[user]
+	# Same identity on both machines, and set nowhere else. Without it git
+	# refuses to commit, and an agent that hits that improvises an identity
+	# with -c or a repo-local [user] rather than stopping.
+	name = Your Name
+	email = you@example.com
+[pull]
+	# Two checkouts of the same branch: refuse to merge when they have
+	# diverged, so a forgotten push is dealt with rather than merged over.
+	ff = only
+[push]
+	autoSetupRemote = true
+[fetch]
+	prune = true
+[rebase]
+	autoStash = true
+	autoSquash = true
+	updateRefs = true
+[diff]
+	algorithm = histogram
+	colorMoved = zebra
+[merge]
+	conflictStyle = zdiff3
+[init]
+	defaultBranch = main
+[branch]
+	sort = -committerdate
+[tag]
+	sort = version:refname
+[commit]
+	verbose = true
+[transfer]
+	fsckObjects = true
+[rerere]
+	enabled = true
+[column]
+	ui = auto
+[alias]
+	# st for one repo's state, recent for what agents committed, lg for the
+	# graph. Git reads this on every call, so open panes pick them up at once.
+	st = status -sb
+	recent = log --stat -5
+	lg = log --oneline --graph --decorate -15
+	# Word-level diff for prose, where a one-word edit otherwise shows as
+	# the whole paragraph removed and re-added.
+	wd = diff --word-diff
