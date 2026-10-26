@@ -1,5 +1,7 @@
 # Cloud box
 
+> **26/10/2026:** Tailscale SSH has an unfixed root-escalation bug (Tailworm). Follow [issue #1](https://github.com/dhpwd/cloud-box/issues/1) to turn it off until Tailscale releases a fix.
+
 Build scripts and shell helpers for a persistent Linux box that runs coding agents (Claude Code, Codex CLI, Gemini CLI) inside tmux, with the laptop and phone as terminals into it. The why and the design are in the blog post: [Running coding agents on a €30 Linux box](https://danhopwood.com/posts/running-coding-agents-on-a-30-euro-linux-box).
 
 The stack, one line each: a plain VPS (Netcup, 32GB), Tailscale with no public ports, mosh, tmux with one session per project, config from a git-backed dotfiles repo, secrets from a 1Password service account, Playwright MCP for a browser. The box is primary and nothing syncs – the laptop keeps a checkout under one rule: git-backed work only, commit and push before switching back.
