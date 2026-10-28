@@ -1,6 +1,6 @@
 # Cloud box
 
-> **26/10/2026:** Tailscale SSH has an unfixed root-escalation bug (Tailworm). Follow [issue #1](https://github.com/dhpwd/cloud-box/issues/1) to turn it off until Tailscale releases a fix.
+> **27/10/2026:** Tailscale v1.104.4 fixes the Tailscale SSH root-escalation bug (Tailworm). If you built a box before then, update Tailscale and follow [issue #1](https://github.com/dhpwd/cloud-box/issues/1) to check Tailscale SSH is back on.
 
 Build scripts and shell helpers for a persistent Linux box that runs coding agents (Claude Code, Codex CLI, Gemini CLI) inside tmux, with the laptop and phone as terminals into it. The why and the design are in the blog post: [Running coding agents on a €30 Linux box](https://danhopwood.com/posts/running-coding-agents-on-a-30-euro-linux-box).
 
