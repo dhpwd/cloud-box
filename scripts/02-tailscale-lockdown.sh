@@ -108,6 +108,7 @@ CONF
   read -rp "Did that new connection succeed? [yes/NO] " ok2
   if [ "$ok2" != "yes" ]; then
     echo "==> Leaving auto-revert armed – it will undo this in under ${REVERT_AFTER}s."
+    echo "    Its result goes to the journal: journalctl -t cloud-box"
     exit 1
   fi
   if ! mkdir "$DECIDED" 2>/dev/null; then

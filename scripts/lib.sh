@@ -150,8 +150,13 @@ close_tree() {
 # undoes the close, so it is always the last to change anything. It holds the
 # close lock (fd 9) until it returns. Its first sleep doesn't, so killing it
 # frees the lock at once.
+# A write to the close's terminal can block (a paused terminal, or a pipe
+# nobody reads), so it is made by a child that is killed after two seconds.
+# shellcheck disable=SC2016 # the child's $1 is the message
+tell_close() { timeout 2 bash -c 'printf "%s\n" "$1" >&3' _ "$1" 2>/dev/null || true; }
+
 revert_close() {
-  local after=$1 decided=$2 dropin=$3 marker=$4 close=$5 ppid pids p failed=
+  local after=$1 decided=$2 dropin=$3 marker=$4 close=$5 ppid pids p msg failed='' stopped=''
   sleep "$after" 9>&-
   mkdir "$decided" 2>/dev/null || return 0
   exec 3>/dev/null
@@ -159,8 +164,9 @@ revert_close() {
   # that has since taken the close's PID is never signalled.
   read -r _ _ _ ppid _ <"/proc/$$/stat"
   if [ "$ppid" = "$close" ]; then
-    exec 3>>"/proc/$close/fd/2" || exec 3>/dev/null
-    echo "!! ${after}s ran out, so the close is being stopped and undone" >&3
+    # The close's stderr, kept for the report once the close is gone. A pipe is
+    # opened read-write, so the open can't wait for a reader.
+    if [ -p "/proc/$close/fd/2" ]; then exec 3<>"/proc/$close/fd/2"; else exec 3>>"/proc/$close/fd/2"; fi || exec 3>/dev/null
     # Stopped first, so nothing in the tree can start another process before
     # the kill.
     kill -STOP "$close" 2>/dev/null
@@ -173,15 +179,21 @@ revert_close() {
       [ "$ppid" = "$close" ] || break
       sleep 0.1
     done
+    stopped=1
   fi
   rm -f "$dropin" "$marker" || failed="removing $dropin"
   systemctl restart ssh || failed="${failed:+$failed, }restarting sshd"
   ufw --force disable >/dev/null || failed="${failed:+$failed, }turning ufw off"
   if [ -z "$failed" ]; then
-    echo "!! The revert has run. Public SSH is open again. Run 'close' again." >&3
+    msg="The revert has run. Public SSH is open again. Run 'close' again."
   else
-    echo "!! The revert did not finish ($failed). Check sshd and ufw from the provider's console." >&3
+    msg="The revert did not finish ($failed). Check sshd and ufw from the provider's console."
   fi
+  # Reported only once the undo is done. The journal keeps the result after an
+  # explicit no, when there is no close left to tell.
+  timeout 5 logger -t cloud-box "$msg" 2>/dev/null || true
+  [ -z "$stopped" ] || tell_close "!! ${after}s ran out, so the close was stopped and undone"
+  tell_close "!! $msg"
 }
 
 # The owner's laptop takes push.sh from GitHub at the commit this checkout is
@@ -287,20 +299,18 @@ KEY_LINE='
 }'
 
 # absent, present or unreadable. A key file that can't be read is never taken
-# for one without the key.
+# for one without the key: it is absent only when looking it up reports no such
+# file and it isn't a link. Any other failure anywhere on the path, such as a
+# directory that can't be entered, leaves its contents unknown.
 key_file_state() {
-  local d
-  if [ -L "$1" ] && [ ! -e "$1" ]; then
-    echo unreadable
-    return
-  fi
-  if [ -e "$1" ]; then
+  local err
+  if err=$(LC_ALL=C stat -L -- "$1" 2>&1 >/dev/null); then
     if [ -r "$1" ]; then echo present; else echo unreadable; fi
-    return
+  elif [ ! -L "$1" ] && [[ $err == *": No such file or directory" ]]; then
+    echo absent
+  else
+    echo unreadable
   fi
-  d=$(dirname "$1")
-  while [ ! -e "$d" ]; do d=$(dirname "$d"); done
-  if [ -x "$d" ]; then echo absent; else echo unreadable; fi
 }
 
 # Succeeds only when the file provably doesn't exist, or is readable and holds

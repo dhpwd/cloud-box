@@ -221,8 +221,15 @@ def shown(key):
 # sent is the bytes the preview listed, whatever happens to the originals while
 # the prompt waits. The file is checked again as opened: still the one
 # collect() found, still a regular file with a single hard link.
+# Staged copies are numbered in manifest order rather than named, so two names
+# that differ only in case can't land on one file on a case-insensitive volume.
+def staged_path(i):
+    return os.path.join(STAGE, str(i))
+
+
 def stage(sent):
     staged, dropped = [], []
+    os.makedirs(STAGE, exist_ok=True)
     for rp, name, dev, ino in sent:
         try:
             fd = os.open(rp, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -234,8 +241,7 @@ def stage(sent):
             if not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != (dev, ino) or st.st_nlink > 1:
                 dropped.append((name, "changed while it was being read"))
                 continue
-            dest = os.path.join(STAGE, name)
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            dest = staged_path(len(staged))
             with open(dest, "wb") as out:
                 shutil.copyfileobj(src, out)
             os.chmod(dest, stat.S_IMODE(st.st_mode))
@@ -293,8 +299,8 @@ def approved():
 
 def archive():
     with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as tf:
-        for name in approved():
-            tf.add(os.path.join(STAGE, name), arcname=name, recursive=False, filter=strip_owner)
+        for i, name in enumerate(approved()):
+            tf.add(staged_path(i), arcname=name, recursive=False, filter=strip_owner)
 
 
 IMPORT = re.compile(r"(?<![\w.@])@((?:~|\$HOME|\$\{HOME\}|\.{1,2})?/[^\s'\"`)\]>,;]+|[^\s'\"`)\]>,;@]+\.md)")
@@ -320,8 +326,8 @@ def expand(p, base):
 def report():
     names = approved()
     users, outside = [], []
-    for name in names:
-        rp = os.path.join(STAGE, name)
+    for i, name in enumerate(names):
+        rp = staged_path(i)
         try:
             with open(rp, encoding="utf-8") as fh:
                 text = fh.read()
@@ -353,7 +359,7 @@ def report():
         for n, found in outside:
             more = " (+%d more)" % (len(found) - 5) if len(found) > 5 else ""
             print("  %s: %s%s" % (n, ", ".join(found[:5]), more))
-    settings = os.path.join(STAGE, "settings.json") if "settings.json" in names else None
+    settings = staged_path(names.index("settings.json")) if "settings.json" in names else None
     if settings:
         try:
             with open(settings) as fh:

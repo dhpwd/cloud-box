@@ -40,9 +40,10 @@ stub() {
   chmod +x "$STUBS/$1"
 }
 
-for c in apt apt-get bun pnpm npm pre-commit journalctl scp; do stub "$c"; done
+for c in apt apt-get bun pnpm npm pre-commit journalctl scp logger; do stub "$c"; done
 stub ufw 'case "$1 $2" in "--force reset")
   if [ -n "${STUB_UFW_SLOW:-}" ]; then (sleep 3; echo "ufw helper wrote rules late" >>"$STUB_LOG") & wait; fi ;;
+  "--force disable") exit "${STUB_UFW_DISABLE:-0}" ;;
 esac'
 for c in sudo dpkg adduser useradd usermod gpasswd passwd locale-gen update-locale getent; do
   stub "$c" 'echo "stub: $0 must not run in tests" >&2; exit 1'
@@ -622,7 +623,8 @@ elif [ ! -e "$T/state/handed-over" ]; then
 else
   ok "handover removes the operator's key from both files, keeps the other, prints fingerprints only"
 fi
-if [[ $out == *"raw.githubusercontent.com/example-org/cloud-box/$HEAD_SHA/laptop/push.sh && BOX_REPO="*'/bin/bash "$d/push.sh" agent@<box name>'* &&
+q=$(printf '%q' "$REPO")
+if [[ $out == *"raw.githubusercontent.com/example-org/cloud-box/$HEAD_SHA/laptop/push.sh && BOX_REPO=$q /bin/bash \"\$d/push.sh\" agent@<box name>"* &&
   $out == *'curl -fsSL -o "$d/push.sh"'* ]]; then
   ok "handover prints the laptop's push.sh line at the checkout's commit, with the checkout's path"
 else
@@ -687,6 +689,28 @@ else
 fi
 chmod 700 "$T/locked"
 rm -f "$T/keys/linked_ak"
+handover_fixture
+mkdir -p "$T/locked/ssh"
+printf '%s\n' "$OPKEY" >"$T/locked/ssh/ak"
+chmod 000 "$T/locked"
+ln -sfn "$T/locked/ssh" "$T/keys/linkdir"
+if out=$(run STUB_UID=0 USER_AUTHORIZED_KEYS="$T/keys/linkdir/ak" bash "$REPO/scripts/06-handover.sh" 2>&1) ||
+  [[ $out != *"cannot read $T/keys/linkdir/ak"* ]]; then
+  bad "handover stops when a directory on the way to the key file is a link it can't follow" "$out"
+else
+  ok "handover stops when a directory on the way to the key file is a link it can't follow"
+fi
+chmod 700 "$T/locked"
+rm -rf "$T/keys/linkdir" "$T/locked/ssh"
+handover_fixture
+ln -sfn "$T/nothing-here" "$T/keys/dangling_ak"
+if out=$(run STUB_UID=0 USER_AUTHORIZED_KEYS="$T/keys/dangling_ak" bash "$REPO/scripts/06-handover.sh" 2>&1) ||
+  [[ $out != *"cannot read $T/keys/dangling_ak"* ]]; then
+  bad "handover stops when the key file is a link to nothing" "$out"
+else
+  ok "handover stops when the key file is a link to nothing"
+fi
+rm -f "$T/keys/dangling_ak"
 handover_fixture
 printf '%s ssh-ed25519 %s\n' "$OTHERKEY" "$OP_BLOB" >"$T/keys/user_ak"
 out=$(run STUB_UID=0 bash "$REPO/scripts/06-handover.sh" 2>&1) || true
@@ -773,6 +797,51 @@ elif ! grep -q '^ufw --force disable' "$LOG" || [ "$after_revert" != 1 ]; then
 else
   ok "a revert that fires mid-close stops the close and is the last to touch the firewall"
 fi
+
+close_fixture
+out=$({ echo yes; echo no; } | run STUB_UID=0 STUB_UFW_DISABLE=1 REVERT_AFTER=1 bash "$REPO/scripts/02-tailscale-lockdown.sh" close 2>&1) || true
+wait_lock_free || true
+if [[ $out != *"journalctl -t cloud-box"* ]]; then
+  bad "after a no, the close says where the revert's result goes" "$out"
+elif ! grep -q "^logger -t cloud-box The revert did not finish (turning ufw off)" "$LOG"; then
+  bad "after a no, a revert that fails says so in the journal" "$(cat "$LOG")"
+else
+  ok "after a no, the revert's result, a failure included, goes to the journal"
+fi
+
+# The close's stderr is a pipe that is full, or that nobody reads: the revert
+# still undoes the close, records it and lets go of the lock.
+for mode in full unread; do
+  close_fixture
+  mkfifo "$T/errpipe"
+  # A reader that holds the pipe open and never reads.
+  # shellcheck disable=SC2217 # sleep is meant not to read
+  sleep 30 <"$T/errpipe" &
+  holder=$!
+  { echo yes; sleep 4; } | run STUB_UID=0 STUB_UFW_SLOW=1 REVERT_AFTER=1 bash "$REPO/scripts/02-tailscale-lockdown.sh" close >"$T/close.out" 2>"$T/errpipe" &
+  close_pid=$!
+  for _ in $(seq 40); do
+    grep -q 'Auto-revert armed' "$T/close.out" 2>/dev/null && break
+    sleep 0.1
+  done
+  if [ "$mode" = full ]; then
+    timeout 1 head -c 65536 /dev/zero >"$T/errpipe" || true
+  else
+    kill "$holder" 2>/dev/null || true
+  fi
+  freed=
+  wait_lock_free && freed=1
+  if [ -z "$freed" ] || ! grep -q '^ufw --force disable' "$LOG" || ! grep -q '^logger -t cloud-box The revert has run' "$LOG"; then
+    bad "a revert whose close's stderr won't take output ($mode pipe) still undoes the close and finishes" "$(cat "$LOG")"
+  else
+    ok "a revert whose close's stderr won't take output ($mode pipe) still undoes the close and finishes"
+  fi
+  timeout 3 cat "$T/errpipe" >/dev/null 2>&1 || true
+  kill "$holder" 2>/dev/null || true
+  wait "$close_pid" 2>/dev/null || true
+  wait_lock_free || true
+  rm -f "$T/errpipe"
+done
 
 close_fixture
 mkfifo "$T/close-answers"
