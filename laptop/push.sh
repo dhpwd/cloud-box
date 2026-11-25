@@ -7,6 +7,8 @@
 #   push.sh <box user>@<box's Tailscale name> [--connectors <name,name>|none]
 #           [--replace] [--exclude <path under ~/.claude>]...
 #
+# BOX_REPO names the checkout on the box, if it isn't /opt/cloud-box.
+#
 # Nothing leaves the laptop until the owner has seen what will be sent and
 # answered yes. ~/.claude.json never leaves: only the definitions of the
 # servers chosen by name do, and only to scripts/04-connectors.sh on the box.
@@ -71,7 +73,6 @@ import json, os, re, sys, tarfile
 
 mode = sys.argv[1]
 chosen = [n.strip() for n in sys.argv[2].split(",") if n.strip()]
-excludes = [os.path.normpath(e).strip("/") for e in sys.argv[3:]]
 
 HOME = os.path.expanduser("~")
 CLAUDE = os.path.join(HOME, ".claude")
@@ -79,7 +80,8 @@ CLAUDE_JSON = os.path.join(HOME, ".claude.json")
 TOP_FILES = ["CLAUDE.md", "settings.json", "keybindings.json"]
 TOP_DIRS = ["skills", "agents", "commands", "rules", "output-styles", "hooks"]
 SKIP = {".DS_Store", ".git", "node_modules", "__pycache__"}
-HISTORY = re.compile(r"(^|[._-])history(\.[A-Za-z0-9]+)?$")
+HISTORY = re.compile(r"^(history\.jsonl|\.[A-Za-z0-9_]*history)$", re.I)
+MANIFEST = os.environ.get("PUSH_MANIFEST", "")
 
 
 def real(p):
@@ -91,26 +93,62 @@ def under(path, root):
     return path == root or path.startswith(root + "/")
 
 
+def exclude_name(e):
+    p = os.path.expanduser(e)
+    if os.path.isabs(p):
+        p = os.path.normpath(p)
+        root = next((r for r in (CLAUDE, real(CLAUDE)) if under(p, r)), None)
+        if root is None:
+            sys.exit("!! --exclude %s is not under ~/.claude" % e)
+        p = p[len(root) + 1:]
+    p = os.path.normpath(p).strip("/")
+    if p in ("", ".") or p.startswith(".."):
+        sys.exit("!! --exclude %s does not name something under ~/.claude" % e)
+    if not os.path.lexists(os.path.join(CLAUDE, p)):
+        sys.exit("!! --exclude %s: there is no ~/.claude/%s" % (e, p))
+    return p
+
+
+excludes = [exclude_name(e) for e in sys.argv[3:]]
+
+
+# Compared by device and inode, not by spelling: a Mac's volume ignores case,
+# and a hard link has a path of its own.
+def ident(p):
+    try:
+        st = os.stat(p)
+        return (st.st_dev, st.st_ino)
+    except OSError:
+        return None
+
+
 FORBIDDEN_FILES = {
-    real(CLAUDE_JSON): "Claude Code's own state (~/.claude.json)",
-    real(os.path.join(CLAUDE, ".credentials.json")): "Claude Code's sign-in",
+    ident(CLAUDE_JSON): "Claude Code's own state (~/.claude.json)",
+    ident(os.path.join(CLAUDE, ".credentials.json")): "Claude Code's sign-in",
 }
-FORBIDDEN_DIRS = [
-    (real(os.path.join(CLAUDE, "projects")), "~/.claude/projects"),
-    (real(os.path.join(CLAUDE, "plugins")), "~/.claude/plugins"),
-    (real(os.path.join(HOME, ".ssh")), "~/.ssh"),
-] + [(real(os.path.join(CLAUDE, e)), "the excluded ~/.claude/" + e) for e in excludes]
+FORBIDDEN_FILES.pop(None, None)
+FORBIDDEN_DIRS = [(ident(d), why) for d, why in [
+    (os.path.join(CLAUDE, "projects"), "~/.claude/projects"),
+    (os.path.join(CLAUDE, "plugins"), "~/.claude/plugins"),
+    (os.path.join(HOME, ".ssh"), "~/.ssh"),
+] + [(os.path.join(CLAUDE, e), "the excluded ~/.claude/" + e) for e in excludes] if ident(d)]
 
 
 def forbidden(rp):
-    if rp in FORBIDDEN_FILES:
-        return FORBIDDEN_FILES[rp]
-    if HISTORY.search(os.path.basename(rp)):
+    if ident(rp) in FORBIDDEN_FILES:
+        return FORBIDDEN_FILES[ident(rp)]
+    if os.path.isfile(rp) and HISTORY.match(os.path.basename(rp)):
         return "a history file"
-    for d, why in FORBIDDEN_DIRS:
-        if under(rp, d):
-            return why
-    return None
+    p = rp
+    while True:
+        i = ident(p)
+        for d, why in FORBIDDEN_DIRS:
+            if i == d:
+                return why
+        parent = os.path.dirname(p)
+        if parent == p:
+            return None
+        p = parent
 
 
 def collect():
@@ -174,6 +212,8 @@ def shown(key):
 def preview():
     check_connectors()
     sent, dropped = collect()
+    with open(MANIFEST, "w") as fh:
+        json.dump(sent, fh)
     keys = list(dict.fromkeys(entry_key(n) for _, n in sent))
     print("Config, copied into ~/.claude on the box:")
     for k in keys:
@@ -210,11 +250,16 @@ def strip_owner(info):
     return info
 
 
+def approved():
+    with open(MANIFEST) as fh:
+        return [tuple(pair) for pair in json.load(fh)]
+
+
 def archive():
-    sent, _ = collect()
     with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as tf:
-        for rp, name in sent:
-            tf.add(rp, arcname=name, recursive=False, filter=strip_owner)
+        for rp, name in approved():
+            if os.path.isfile(rp) and not os.path.islink(rp):
+                tf.add(rp, arcname=name, recursive=False, filter=strip_owner)
 
 
 IMPORT = re.compile(r"(?<![\w.@])@((?:~|\$HOME|\$\{HOME\}|\.{1,2})?/[^\s'\"`)\]>,;]+|[^\s'\"`)\]>,;@]+\.md)")
@@ -238,7 +283,7 @@ def expand(p, base):
 
 
 def report():
-    sent, _ = collect()
+    sent = approved()
     names = [n for _, n in sent]
     users, outside = [], []
     for rp, name in sent:
@@ -261,7 +306,9 @@ def report():
         if found:
             outside.append((name, found))
 
-    print("Copied %d file(s) into ~/.claude on the box." % len(sent))
+    print("Copied into ~/.claude on the box:")
+    for k in dict.fromkeys(entry_key(n) for n in names):
+        print("  " + k)
     if users:
         print("\nMention /Users/ or this laptop's home directory, which the box doesn't have. Fix by hand:")
         for n in users:
@@ -306,6 +353,10 @@ elif mode == "report":
 else:
     sys.exit("unknown mode " + mode)
 PYEOF
+
+WORK=$(mktemp -d) || die "could not make a temporary directory"
+trap 'rm -rf "$WORK"' EXIT
+export PUSH_MANIFEST="$WORK/manifest.json"
 
 py() {
   python3 -I -c "$PY" "$@" ${EXCLUDES[@]+"${EXCLUDES[@]}"}
@@ -352,18 +403,20 @@ echo "    link: open it in a browser, approve, and the copy carries on."
 
 failed=0
 echo "==> Config"
+config_copied=1
 if ! py archive "$CHOSEN" | remote 'mkdir -p ~/.claude && tar -x -f - -C ~/.claude --no-same-owner'; then
   echo "!! copying the config failed" >&2
   failed=1
+  config_copied=
 fi
 
-if [ -n "$CHOSEN" ]; then
-  echo "==> Connectors"
-  cmd="$(printf '%q' "$BOX_REPO/scripts/04-connectors.sh")${REPLACE:+ --replace}"
-  if ! py connectors "$CHOSEN" | remote "$cmd"; then
-    echo "!! 04-connectors.sh did not finish cleanly – see its lines above" >&2
-    failed=1
-  fi
+# Runs with no connector chosen too, so the status of claude.ai connectors and
+# their sign-in steps still show.
+echo "==> Connectors"
+cmd="$(printf '%q' "$BOX_REPO/scripts/04-connectors.sh")${REPLACE:+ --replace}"
+if ! py connectors "$CHOSEN" | remote "$cmd"; then
+  echo "!! 04-connectors.sh did not finish cleanly – see its lines above" >&2
+  failed=1
 fi
 
 echo "==> Git identity"
@@ -377,5 +430,9 @@ else
 fi
 
 echo
-py report "$CHOSEN"
+if [ -n "$config_copied" ]; then
+  py report "$CHOSEN"
+else
+  echo "!! The config did not reach the box. Fix the error above and run this again."
+fi
 exit "$failed"

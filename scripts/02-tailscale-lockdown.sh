@@ -17,8 +17,13 @@ require_root
 
 DROPIN="$SSHD_CONFIG_D/99-tailscale.conf"
 # Whichever of the confirmation and the revert creates this first wins, and the
-# other stands down, so a late "yes" can't report a close the revert undid.
-DECIDED="$CLOUD_BOX_RUN_DIR/decided"
+# other stands down, so a late "yes" can't report a close the revert undid. One
+# per run, so a prompt left open by an earlier close can't settle a later one.
+DECIDED="$CLOUD_BOX_RUN_DIR/decided.$$"
+
+stop_if_reverted() {
+  [ ! -e "$DECIDED" ] || die "${REVERT_AFTER}s ran out before the close finished, and the revert has reopened public SSH. Run 'close' again."
+}
 
 phase_up() {
   if ! command -v tailscale >/dev/null; then
@@ -58,6 +63,8 @@ phase_close() {
   TS_IP=$(tailscale ip -4)
   [ -n "$TS_IP" ] || { echo "No Tailscale IPv4 – refusing to close public SSH" >&2; exit 1; }
   TS_NAME=$(tailscale status --json | jq -r .Self.DNSName | sed 's/\.$//')
+  # Installed by 01-base.sh, so nothing below waits on apt inside the revert window.
+  command -v ufw >/dev/null || die "ufw is not installed – run 01-base.sh first"
 
   read -rp "Confirmed SSH over the tailnet works from the owner's laptop? [yes/NO] " ok
   [ "$ok" = "yes" ] || { echo "Aborting."; exit 1; }
@@ -65,11 +72,12 @@ phase_close() {
   # Dead-man switch. Everything below is undone in REVERT_AFTER seconds unless
   # the script reaches the end and cancels it. A wrong rule then locks you out
   # for five minutes instead of until you can reach the web console. The job
-  # holds the lock (fd 9) until it has run or been killed. Its sleep does not,
-  # so killing the job frees the lock at once.
+  # holds the lock (fd 9) until it has run or been killed, and this script lets
+  # go of it once the job is armed, so the lock is free the moment the revert
+  # has run, even with the prompt below still open. The job's sleep doesn't
+  # hold it, so killing the job frees the lock at once.
   REVERT_AFTER="${REVERT_AFTER:-300}"
   rm -f "$CLOSED_MARKER"
-  rm -rf "$DECIDED"
   # shellcheck disable=SC2016 # the job's $1.. are the arguments after the script
   nohup bash -c 'sleep "$1" 9>&-
     mkdir "$2" 2>/dev/null || exit 0
@@ -77,8 +85,10 @@ phase_close() {
     systemctl restart ssh
     ufw --force disable' _ "$REVERT_AFTER" "$DECIDED" "$DROPIN" "$CLOSED_MARKER" >/dev/null 2>&1 &
   REVERT_PID=$!
+  exec 9>&-
   echo "==> Auto-revert armed for ${REVERT_AFTER}s (pid $REVERT_PID)"
 
+  stop_if_reverted
   echo "==> Binding sshd to $TS_IP only"
   # These settings govern sshd alone. Tailscale SSH is a separate listener that
   # never reads them: its control is the tailnet's SSH policy.
@@ -92,8 +102,8 @@ CONF
   sshd -t
   systemctl restart ssh
 
+  stop_if_reverted
   echo "==> Host firewall: allow only Tailscale"
-  apt install -y ufw
   ufw --force reset
   ufw default deny incoming
   ufw default allow outgoing

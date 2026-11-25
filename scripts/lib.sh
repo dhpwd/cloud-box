@@ -1,7 +1,8 @@
 # shellcheck shell=bash
 # Sourced by every script in scripts/ and optional/. read_inputs loads box.env
-# from the repo root, where a non-empty environment variable of the same name
-# wins over the file, and refuses any value a later step would trip over.
+# from the repo root, where an environment variable of the same name wins over
+# the file, even an empty one, and refuses any value a later step would trip
+# over.
 #
 # The system paths below can be pointed elsewhere from the environment so
 # tests/run.sh can run the scripts against a temporary directory. Nothing on a
@@ -49,7 +50,7 @@ load_box_env() {
       \"*\") val=${val#\"} && val=${val%\"} ;;
       \'*\') val=${val#\'} && val=${val%\'} ;;
     esac
-    [ -n "${!key:-}" ] || printf -v "$key" '%s' "$val"
+    [ -n "${!key+set}" ] || printf -v "$key" '%s' "$val"
   done <"$BOX_ENV_FILE"
 }
 
@@ -159,11 +160,12 @@ as_box_user() {
   runuser -u "$BOX_USER" -- "$@"
 }
 
-# Runs one of this file's functions as the box user. The script is
-# single-quoted on purpose: its $1.. are the arguments after it.
+# Runs one of this file's functions as the box user, stopping at the first
+# command that fails. The script is single-quoted on purpose: its $1.. are the
+# arguments after it.
 # shellcheck disable=SC2016
 as_box_user_lib() {
-  as_box_user bash -c '. "$1" && shift && "$@"' _ "$CLOUD_BOX_LIB" "$@"
+  as_box_user bash -c 'set -e; . "$1"; shift; "$@"' _ "$CLOUD_BOX_LIB" "$@"
 }
 
 user_authorized_keys() {
@@ -182,8 +184,13 @@ key_blob() {
   printf '%s\n' "$1" | awk '{ for (i = 1; i < NF; i++) if ($i ~ /^(ssh-|ecdsa-|sk-)/) { print $(i + 1); exit } }'
 }
 
+# Marks (hit) an active authorized_keys line holding key k, judged by the field
+# after the key type, so neither a comment nor a commented-out line counts.
+# shellcheck disable=SC2016
+KEY_LINE='{ hit = 0 } !/^[[:space:]]*#/ { for (i = 1; i < NF; i++) if ($i ~ /^(ssh-|ecdsa-|sk-)/ && $(i + 1) == k) hit = 1 }'
+
 file_has_key() {
-  [ -f "$1" ] && awk -v k="$2" '{ for (i = 1; i <= NF; i++) if ($i == k) found = 1 } END { exit !found }' "$1"
+  [ -f "$1" ] && awk -v k="$2" "$KEY_LINE"' hit { found = 1 } END { exit !found }' "$1"
 }
 
 add_key() {
@@ -202,20 +209,24 @@ add_key() {
   echo "    added the operator's key to $file"
 }
 
+# Writes the kept lines to a new file beside the old one and renames it over,
+# so a failed write leaves the original as it was.
 remove_key() {
-  local file=$1 blob tmp before after
+  local file=$1 blob tmp n
   blob=$(key_blob "$2")
-  [ -f "$file" ] || {
+  if [ ! -f "$file" ]; then
     echo "    $file does not exist"
-    return
-  }
-  tmp=$(mktemp "$file.XXXXXX")
-  awk -v k="$blob" '{ for (i = 1; i <= NF; i++) if ($i == k) next } { print }' "$file" >"$tmp"
-  before=$(wc -l <"$file")
-  after=$(wc -l <"$tmp")
-  cat "$tmp" >"$file"
-  rm -f "$tmp"
-  echo "    removed $((before - after)) line(s) from $file"
+    return 0
+  fi
+  n=$(awk -v k="$blob" "$KEY_LINE"' hit { n++ } END { print n + 0 }' "$file")
+  if ! tmp=$(mktemp "$file.XXXXXX") ||
+    ! awk -v k="$blob" "$KEY_LINE"' !hit { print }' "$file" >"$tmp" ||
+    ! mv -f "$tmp" "$file"; then
+    rm -f "${tmp:-}"
+    echo "!! could not rewrite $file" >&2
+    return 1
+  fi
+  echo "    removed $n line(s) from $file"
 }
 
 # ssh-keygen prints each key's comment beside its fingerprint, and comments
@@ -240,10 +251,14 @@ grant_operator_key() {
 }
 
 revoke_operator_key() {
-  local file
+  local file blob
   file=$(user_authorized_keys)
-  remove_key "$ROOT_AUTHORIZED_KEYS" "$OPERATOR_PUBKEY"
-  as_box_user_lib remove_key "$file" "$OPERATOR_PUBKEY"
+  blob=$(key_blob "$OPERATOR_PUBKEY")
+  remove_key "$ROOT_AUTHORIZED_KEYS" "$OPERATOR_PUBKEY" || die "the operator's key may still be in $ROOT_AUTHORIZED_KEYS"
+  as_box_user_lib remove_key "$file" "$OPERATOR_PUBKEY" || die "the operator's key may still be in $file"
+  if file_has_key "$ROOT_AUTHORIZED_KEYS" "$blob" || as_box_user_lib file_has_key "$file" "$blob"; then
+    die "the operator's key is still in an authorized_keys file, so the handover is not complete"
+  fi
   echo "    keys left for root:"
   key_fingerprints "$ROOT_AUTHORIZED_KEYS"
   echo "    keys left for $BOX_USER:"
@@ -283,7 +298,7 @@ require_sshd_key_only() {
   for user; do
     for kw in passwordauthentication kbdinteractiveauthentication; do
       [ "$(sshd_setting "$user" "$kw")" = no ] ||
-        die "sshd still allows $kw for $user. The first file that sets it is $(sshd_first_setter "$kw")"
+        die "sshd still allows $kw for $user. The first file that sets it is $(sshd_first_setter "$kw"). If that file says no, a Match block overrides it"
     done
   done
 }

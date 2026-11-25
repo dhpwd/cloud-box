@@ -25,11 +25,11 @@ A step on the owner's laptop is run by whoever is at its keyboard. When I build 
 - The Claude app on their phone
 - A Mac or Linux laptop. `laptop/push.sh` doesn't run on Windows
 
-**The operator needs:** the server's IP address, the repo list, the names of the connectors to bring across (from the owner's `claude mcp list`), and any env files or folders with no git remote, with where each one goes on the box.
+**The operator needs:** the server's IP address, the repo list, the names of the connectors to bring across (`laptop/push.sh` lists them by name when it runs without `--connectors`, and `claude mcp list` would show their keys on a shared screen), and any env files or folders with no git remote, with where each one goes on the box.
 
 ## The inputs
 
-Everything that differs between owners lives in one file, `box.env` at the repo root, which every script reads. Copy `box.env.example` and fill it in. A non-empty environment variable of the same name wins over the file. The file holds no secret, and git ignores it.
+Everything that differs between owners lives in one file, `box.env` at the repo root, which every script reads. Copy `box.env.example` and fill it in. An environment variable of the same name wins over the file, even an empty one. The file holds no secret, and git ignores it.
 
 | Input             | Required | What it is                                                                                                                                    |
 | ----------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -126,7 +126,7 @@ A repo's own tracked `.mcp.json` arrives with its clone. If it reads environment
 
 ### 5. Config, connectors and files (owner's laptop)
 
-The laptop takes `push.sh` from the box, so it is always the revision the box is running:
+The laptop takes `push.sh` from the box, so it is always the revision the box is running. If the checkout isn't at `/opt/cloud-box`, set `BOX_REPO` to its path in front of `/bin/bash`:
 
 ```bash
 ( d=$(mktemp -d) || exit 1; trap 'rm -rf "$d"' EXIT; scp <box user>@<box name>:/opt/cloud-box/laptop/push.sh "$d/push.sh" && /bin/bash "$d/push.sh" <box user>@<box name> --connectors <name,name> )
@@ -134,11 +134,11 @@ The laptop takes `push.sh` from the box, so it is always the revision the box is
 
 Arguments after `<box user>@<box name>`:
 
-- `--connectors <name,name>` – the user-scope connectors to send, by name. `--connectors none` sends none. With neither, it lists the names and asks. Nothing is sent by default, because a laptop can hold another business's connectors
+- `--connectors <name,name>` – the user-scope connectors to send, by name. `--connectors none` sends none, and the box still lists the status of the claude.ai connectors. With neither, it lists the names and asks. Nothing is sent by default, because a laptop can hold another business's connectors
 - `--replace` – replace a connector already registered on the box under the same name. Without it, an existing one is left as it is
-- `--exclude <path under ~/.claude>` – leave out a file or folder, such as `skills/client-work`. Repeat it for more
+- `--exclude <path under ~/.claude>` – leave out a file or folder, such as `skills/client-work` or `~/.claude/skills/client-work`. Repeat it for more. A path that names nothing under `~/.claude` stops the run before anything is sent
 
-It copies from the laptop's `~/.claude/` into the box user's: `CLAUDE.md`, `settings.json`, `keybindings.json` and the `skills`, `agents`, `commands`, `rules`, `output-styles` and `hooks` folders, following symlinks. It overwrites files of the same name on the box and deletes nothing. It also sets the box's git identity from the laptop's, so a session can commit. Before anything leaves the laptop it lists what it will send, by name and with any symlink's target, and sends nothing on any answer but `yes`. The connectors go to `scripts/04-connectors.sh` on the box, which registers them without printing a key, URL or command line. Afterwards it names anything to fix by hand: files that mention `/Users/`, imports and `~` paths that point at something that wasn't sent, plugins `settings.json` turns on, and servers registered for one project on the laptop.
+It copies from the laptop's `~/.claude/` into the box user's: `CLAUDE.md`, `settings.json`, `keybindings.json` and the `skills`, `agents`, `commands`, `rules`, `output-styles` and `hooks` folders, following symlinks. It overwrites files of the same name on the box and deletes nothing. It also sets the box's git identity from the laptop's, so a session can commit. Before anything leaves the laptop it lists what it will send, by name and with any symlink's target, and sends nothing on any answer but `yes`. It sends only what that list showed, even if a file is added while it waits. The connectors go to `scripts/04-connectors.sh` on the box, which registers them without printing a key, URL or command line. Afterwards it lists what it copied and names anything to fix by hand: files that mention `/Users/` or the laptop's home directory, imports and `~` paths that point at something that wasn't sent, plugins `settings.json` turns on, and servers registered for one project on the laptop.
 
 It needs `ssh`, `git` and `python3` on the laptop. A Mac has `python3` once Apple's command line tools are installed (`xcode-select --install`).
 
@@ -232,7 +232,7 @@ From Netcup's help pages (read 25/11/2026: [accessing your server](https://www.n
 
 ## Memory
 
-Every Remote Control server opens one session in its repo when it starts, and open sessions are what use memory: each one is a full Claude Code process with its own copy of every stdio connector, many times the size of an idle server. Ten repos' startup sessions could take most of a 16GB box. So once the phone checks pass, end each repo's startup session in the app. The server stays up and starts a new session whenever one is opened.
+Every Remote Control server opens one session in its repo each time it starts, including after a reboot or a restart, and open sessions are what use memory: each one is a full Claude Code process with its own copy of every stdio connector, many times the size of an idle server. Ten repos' startup sessions could take most of a 16GB box. So once the phone checks pass, end each repo's startup session in the app, and again after the box restarts. The server stays up and starts a new session whenever one is opened.
 
 `RC_CAPACITY` caps how many sessions one repo's server runs at once. Change it in `box.env` and run `05-remote-control.sh` again, which restarts the servers.
 
@@ -245,7 +245,12 @@ As root, add it to `REPOS` (and `RC_REPOS`, if that is set) in `/opt/cloud-box/b
 Every script is safe to run again and stops, naming the step to resume, when something it needs is missing.
 
 - **After step 1:** public SSH is key-only, the operator's key is on the box user, and nothing of the owner's is on the box
-- **After step 2 and up to step 8:** Tailscale is up on the owner's tailnet and public SSH is still open, key-only. If the owner's laptop has connected over the tailnet, run the close before leaving, so nothing waits on a public port. The operator's key stays until the handover
+- **After step 2:** Tailscale is up on the owner's tailnet and public SSH is still open, key-only. If the owner's laptop has connected over the tailnet, run the close before leaving, so nothing waits on a public port. The operator's key stays until the handover, whatever step the setup stops at
+- **After step 3:** the owner's Claude and GitHub sign-ins are on the box. Close public SSH before leaving
+- **After step 4:** the repos are cloned. A repo left at `--clone-only` has no dependencies yet: run `03-repos.sh` again once its env file is in place
+- **After step 5:** the config, connectors and git identity are on the box. Running `push.sh` again overwrites files of the same name and leaves registered connectors alone
+- **After steps 6 and 7:** any repo whose trust step was missed has no running server. `05-remote-control.sh` names it, and running it again after the trust step starts it
+- **After step 8:** the box is in use, with public SSH still open. Run the close
 - **After step 9, before step 10:** the box is closed but the operator's key is still on it. The owner runs `06-handover.sh` as root over Tailscale SSH
 
 ## Getting back in, and getting help
@@ -254,7 +259,7 @@ The owner reaches the box over Tailscale SSH from any laptop signed in to their 
 
 After the handover, someone helping the owner has no access of their own. The owner shares their screen on a call and hands over keyboard control, and the helper works from the owner's laptop over that route, or in the provider's console if Tailscale or SSH is the fault. The owner types no terminal commands.
 
-**Granting sudo.** The box user has no password and isn't in the `sudo` group, so the agents can't give themselves admin rights. To grant it deliberately, as root: `passwd <box user>`, then `usermod -aG sudo <box user>`. Every session on the box runs as that account, so think before you do.
+**Granting sudo.** The box user has no password and isn't in the `sudo` group, so the agents can't give themselves admin rights. To grant it deliberately, as root: `passwd <box user>`, then `usermod -aG sudo <box user>`. Every session on the box runs as that account, so think before you do. `01-base.sh` refuses to run while the box user has sudo, so take it away again before re-running the base build.
 
 **Tailscale SSH and root.** sshd's settings, including `PermitRootLogin no`, govern only sshd. Tailscale SSH is a separate listener that never reads them: its control is the tailnet's SSH policy. Under Tailscale's default policy the owner can reach root on their own machine after a browser approval, which is reused for a period ([Tailscale SSH docs](https://tailscale.com/docs/features/tailscale-ssh), read 24/11/2026).
 
@@ -277,9 +282,22 @@ After the handover, someone helping the owner has no access of their own. The ow
 
 Not part of a standard setup.
 
-- `optional/playwright-mcp.sh` – a browser for the agents: two Playwright MCP servers (`playwright`, with a persistent profile, and `playwright-isolated`) at a pinned version, on a display of their own. Run it as root first (the system packages), then as the box user (the browser and the registrations)
-- `optional/terminal.sh` – the terminal route: mosh, tmux 3.7 with a session per repo, and the shell helpers. Run it as root first (packages and the tmux build), then as the box user. `shell/` holds the laptop side: source `shell/laptop.zsh` from `~/.zshrc`, add `shell/gitconfig` as a global `include.path`, point `core.excludesFile` at `shell/gitignore` and symlink `shell/starship.toml` to `~/.config/starship.toml`. The helpers need `mosh`, `fzf`, `fd`, `bat`, `starship` and `pngpaste` from Homebrew
-- `optional/supervisor.sh` – brings the Claude Code background-job supervisor back after a reboot, for `claude --bg` jobs. As the box user
+- `optional/playwright-mcp.sh` – a browser for the agents: two Playwright MCP servers (`playwright`, with a persistent profile, and `playwright-isolated`) at a pinned version, on a display of their own. As root first (the system packages), then as the box user (the browser and the registrations):
+
+  ```bash
+  /opt/cloud-box/optional/playwright-mcp.sh     # as root
+  /opt/cloud-box/optional/playwright-mcp.sh     # then as the box user
+  ```
+
+- `optional/terminal.sh` – the terminal route: mosh, tmux 3.7 with a session per repo, and the shell helpers. As root first (packages and the tmux build), then as the box user:
+
+  ```bash
+  /opt/cloud-box/optional/terminal.sh     # as root
+  /opt/cloud-box/optional/terminal.sh     # then as the box user
+  ```
+
+  Its `killagents` helper stops every `claude` process, the Remote Control servers included, which systemd then restarts. `shell/` holds the laptop side: source `shell/laptop.zsh` from `~/.zshrc`, add `shell/gitconfig` as a global `include.path`, point `core.excludesFile` at `shell/gitignore` and symlink `shell/starship.toml` to `~/.config/starship.toml`. The helpers need `mosh`, `fzf`, `fd`, `bat`, `starship` and `pngpaste` from Homebrew
+- `optional/supervisor.sh` – brings the Claude Code background-job supervisor back after a reboot, for `claude --bg` jobs. As the box user: `/opt/cloud-box/optional/supervisor.sh`
 
 ## Coming from the blog post
 

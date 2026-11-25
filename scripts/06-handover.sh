@@ -28,23 +28,25 @@ touch "$HANDED_OVER_MARKER"
 echo "==> Removing the operator's key"
 revoke_operator_key
 
+# The keys are already gone by here, so a part that can't be read is named and
+# the rest still prints.
+unreadable() { echo "    (could not read this – check it by hand)"; }
 echo
 echo "==> Final state"
 echo "--- Remote Control servers"
-systemctl --user -M "$BOX_USER@" list-units 'claude-rc@*' --all --no-pager --plain || true
+systemctl --user -M "$BOX_USER@" list-units 'claude-rc@*' --all --no-pager --plain || unreadable
 echo "--- Tailscale name"
-tailscale status --json | jq -r '.Self.DNSName' | sed 's/\.$//'
+{ tailscale status --json | jq -r '.Self.DNSName' | sed 's/\.$//'; } || unreadable
 echo "--- sshd"
-sshd -T | grep -E '^(passwordauthentication|kbdinteractiveauthentication|permitrootlogin|listenaddress|allowusers) '
+{ sshd -T | grep -E '^(passwordauthentication|kbdinteractiveauthentication|permitrootlogin|listenaddress|allowusers) '; } || unreadable
 echo "--- ufw"
-ufw status verbose
+ufw status verbose || unreadable
 # ufw status shows only ufw's own rules. Tailscale adds chains of its own.
 echo "--- every firewall rule, IPv4 and IPv6"
 if command -v nft >/dev/null; then
-  nft list ruleset
+  nft list ruleset || unreadable
 else
-  iptables -S
-  ip6tables -S
+  { iptables -S && ip6tables -S; } || unreadable
 fi
 
 cat <<MSG

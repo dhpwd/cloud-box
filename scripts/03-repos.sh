@@ -48,7 +48,10 @@ for i in "${!REPO_DIRS[@]}"; do
   path="$WORKSPACE/$dir"
   if [ -d "$path/.git" ]; then
     echo "==> $dir exists, pulling"
-    git -C "$path" pull --ff-only || echo "    !! not fast-forwardable – left as it is"
+    if ! git -C "$path" pull --ff-only; then
+      failed+=("$dir: git pull --ff-only failed (git's message is above). The clone is left as it is")
+      continue
+    fi
   else
     echo "==> cloning $slug into $dir"
     if ! gh repo clone "$slug" "$path"; then

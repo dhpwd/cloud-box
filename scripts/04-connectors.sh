@@ -34,17 +34,38 @@ registered=()
 for name in ${names[@]+"${names[@]}"}; do
   def=$(printf '%s' "$input" | jq -c --arg n "$name" '.[$n]')
 
-  if printf '%s' "$def" | jq -e '[.command?, (.args? // [])[], ((.env? // {}) | .[])]
-      | map(strings) | any(test("/Users/|/opt/homebrew|/Applications"))' >/dev/null; then
+  # jq's error messages quote the value they failed on, so they go nowhere.
+  if ! printf '%s' "$def" | jq -e 'type == "object" and ((.command // "") | type == "string")
+      and ((.args // []) | type == "array") and ((.env // {}) | type == "object")' >/dev/null 2>&1; then
+    echo "    $name: skipped – the definition is not in the form ~/.claude.json uses"
+    attention=1
+    continue
+  fi
+  if printf '%s' "$def" | jq -e '[.command, (.args // [])[], ((.env // {}) | .[])]
+      | map(strings) | any(test("/Users/|/opt/homebrew|/Applications"))' >/dev/null 2>&1; then
     echo "    $name: skipped – its command, arguments or env hold a macOS path. Re-add it on the box by hand"
     attention=1
     continue
   fi
 
+  cmd=$(printf '%s' "$def" | jq -r 'if (.type // "stdio") == "stdio" then .command // "" else "" end')
+  if [ -n "$cmd" ] && ! command -v "$cmd" >/dev/null; then
+    echo "    $name: its command is not on this box's PATH – install it, or the server can't start"
+    attention=1
+  fi
+  mapfile -t vars < <(printf '%s' "$def" | jq -r '[.. | strings] | map(scan("\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}") | .[0]) | unique[]')
+  for var in ${vars[@]+"${vars[@]}"}; do
+    if [ -z "${!var+set}" ]; then
+      echo "    $name: refers to \${$var}, which this box's environment doesn't set"
+      attention=1
+    fi
+  done
+
   replaced=
   if claude mcp get "$name" >/dev/null 2>&1; then
     if [ -z "$REPLACE" ]; then
       echo "    $name: already registered – left as it is (--replace replaces it)"
+      registered+=("$name")
       continue
     fi
     if ! claude mcp remove --scope user "$name" >/dev/null 2>&1; then
@@ -65,37 +86,28 @@ for name in ${names[@]+"${names[@]}"}; do
   fi
   if [ -n "$replaced" ]; then echo "    $name: replaced"; else echo "    $name: registered"; fi
   registered+=("$name")
-
-  cmd=$(printf '%s' "$def" | jq -r 'if (.type // "stdio") == "stdio" then .command // "" else "" end')
-  if [ -n "$cmd" ] && ! command -v "$cmd" >/dev/null; then
-    echo "    $name: its command is not on this box's PATH – install it, or the server can't start"
-    attention=1
-  fi
-  mapfile -t vars < <(printf '%s' "$def" | jq -r '[.. | strings] | map(scan("\\$\\{([A-Za-z_][A-Za-z0-9_]*)\\}") | .[0]) | unique[]')
-  for var in ${vars[@]+"${vars[@]}"}; do
-    if [ -z "${!var+set}" ]; then
-      echo "    $name: refers to \${$var}, which this box's environment doesn't set"
-      attention=1
-    fi
-  done
 done
 
-# The list's raw lines carry each server's URL or command line, so only the
-# name and a status that matches a known form are printed.
+# The list's raw lines carry each server's URL or command line, and a failure
+# can add a diagnostic that quotes either, so only the name and a fixed label
+# are printed.
 echo
 echo "==> Status"
 needs_login=()
 while IFS= read -r line; do
   case $line in *": "*" - "*) ;; *) continue ;; esac
   n=${line%%: *}
-  s=${line##* - }
-  case $s in
-    *Connected* | *"Needs authentication"* | *Failed* | *Pending* | *Disabled*) ;;
+  case ${line##* - } in
+    *Failed*) s="failed to connect" ;;
+    *"Needs authentication"*) s="needs sign-in" ;;
+    *Connected*) s=connected ;;
+    *Pending*) s="pending approval" ;;
+    *Disabled*) s=disabled ;;
     *) s="status not recognised" ;;
   esac
   if [[ $n == "claude.ai "* ]] || in_list "$n" ${registered[@]+"${registered[@]}"}; then
     echo "    $n: $s"
-    [[ $s != *"Needs authentication"* ]] || needs_login+=("$n")
+    [ "$s" != "needs sign-in" ] || needs_login+=("$n")
   fi
 done < <(claude mcp list 2>/dev/null || true)
 

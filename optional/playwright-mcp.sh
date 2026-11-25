@@ -21,7 +21,7 @@ read_inputs
 
 PLAYWRIGHT_MCP_VERSION=0.0.85
 # What `install-deps chromium` installs on Debian 13 for the playwright-core this
-# version bundles (1.64.1), xvfb included. Bump it with the version.
+# version bundles (1.66.0-alpha-2026-11-09), xvfb included. Bump it with the version.
 APT_PACKAGES=(
   xvfb fonts-noto-color-emoji fonts-unifont libfontconfig1 libfreetype6 xfonts-scalable
   fonts-liberation fonts-ipafont-gothic fonts-wqy-zenhei fonts-tlwg-loma-otf fonts-freefont-ttf
@@ -123,10 +123,13 @@ claude mcp remove playwright -s user 2>/dev/null || true
 # told otherwise, so a renderer bug on any page it loads runs code as the box user
 # rather than inside the sandbox. The box supports the sandbox (unprivileged user
 # namespaces), so nothing is lost by turning it on.
+# claude mcp add prints the server's full command line, so its output goes
+# nowhere and only the name is reported.
 claude mcp add --scope user playwright -e DISPLAY=:98 \
   -- npx -y "$SPEC" --browser chromium --sandbox \
      --user-data-dir "$HOME/.local/share/playwright-profile" \
-     --output-dir "$HOME/.local/share/playwright-mcp-output"
+     --output-dir "$HOME/.local/share/playwright-mcp-output" >/dev/null
+echo "    playwright: registered"
 
 # A second server from the same pin, with its profile kept in memory: no logins,
 # and empty again whenever the browser closes. For pages nobody here controls,
@@ -134,7 +137,8 @@ claude mcp add --scope user playwright -e DISPLAY=:98 \
 claude mcp remove playwright-isolated -s user 2>/dev/null || true
 claude mcp add --scope user playwright-isolated -e DISPLAY=:98 \
   -- npx -y "$SPEC" --browser chromium --sandbox --isolated \
-     --output-dir "$HOME/.local/share/playwright-mcp-output"
+     --output-dir "$HOME/.local/share/playwright-mcp-output" >/dev/null
+echo "    playwright-isolated: registered"
 
 # Read the build back from the installer rather than listing the cache directory,
 # which is ambiguous while more than one build is present.

@@ -18,7 +18,9 @@ esac
 echo "==> Architecture: $ARCH"
 
 echo "==> Packages"
-apt-get update && apt-get upgrade -y
+# Keeps a changed config file rather than asking, which would stop a run with
+# no terminal.
+apt-get update && apt-get -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade -y
 # build-essential and pkg-config: native Node modules and Python source builds
 # in an owner's repos need them, and without them the failure only shows as a
 # failed install in 03-repos.sh. ufw is installed here, inactive, so the
@@ -50,11 +52,8 @@ echo "==> User '$BOX_USER'"
 if ! id "$BOX_USER" >/dev/null 2>&1; then
   adduser --disabled-password --gecos "" "$BOX_USER"
 fi
-privileged=$(id -nG "$BOX_USER" | tr ' ' '\n' | grep -xE 'sudo|wheel|root|disk|docker|lxd|incus|shadow' | tr '\n' ' ' || true)
-if [ -n "$privileged" ]; then
-  echo "    !! $BOX_USER is in: $privileged– the agents run as this account and get those rights"
-  echo "    !! to remove one:  gpasswd -d $BOX_USER <group>"
-fi
+privileged=$(id -nG "$BOX_USER" | tr ' ' '\n' | grep -xE 'sudo|wheel|root|disk|docker|lxd|incus|incus-admin|shadow|staff' | tr '\n' ' ' || true)
+[ -z "$privileged" ] || die "$BOX_USER is in: ${privileged% }. The agents run as this account, so it must have no admin rights. Remove each with: gpasswd -d $BOX_USER <group>, or choose another BOX_USER. Then run this again"
 
 echo "==> Operator's key for $BOX_USER"
 # A real SSH sign-in as the box user is how the operator gets a working
@@ -108,7 +107,9 @@ NODE_VER=24.22.1
 export NVM_DIR="$HOME/.nvm"
 [ -d "$NVM_DIR" ] || curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
 . "$NVM_DIR/nvm.sh"
-nvm install "$NODE_VER" && nvm alias default "$NODE_VER"
+nvm install "$NODE_VER"
+# Only when no default is set yet, so a deliberate bump survives a re-run.
+[ "$(nvm version default)" != N/A ] || nvm alias default "$NODE_VER"
 
 # Make nvm available to login shells that read ~/.profile as well as ~/.bashrc.
 grep -q 'NVM_DIR' ~/.profile || cat >> ~/.profile <<'PROF'

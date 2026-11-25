@@ -51,7 +51,11 @@ stub ip6tables 'echo "-P INPUT DROP"'
 stub id 'case $1 in -u) echo "${STUB_UID:-1000}" ;; -un) echo "${STUB_USER:-agent}" ;; *) exec /usr/bin/id "$@" ;; esac'
 stub runuser 'while [ "$1" != -- ]; do shift; done; shift; exec "$@"'
 stub loginctl 'echo "${STUB_LINGER:-yes}"'
-stub systemctl 'case $* in *is-active*) exit 1 ;; *show*) echo 0 ;; esac'
+stub systemctl 'case $* in *is-active*) [ "${STUB_ACTIVE:-no}" = yes ] ;; *show*) echo 4242 ;; esac'
+stub ps 'printf "%s\n" "${STUB_PS_ARGS:-}"'
+# Real git for everything but pull, which would reach a network or, from an
+# empty .git, a repository above the temporary directory.
+stub git 'for a; do [ "$a" != pull ] || exit "${STUB_GIT_PULL:-0}"; done; exec /usr/bin/git "$@"'
 stub tailscale 'case $1 in ip) echo 100.64.0.1 ;; status) echo "{\"Self\":{\"DNSName\":\"box.example.ts.net.\"}}" ;; esac'
 stub sshd 'case $1 in -T) printf "passwordauthentication %s\nkbdinteractiveauthentication no\npermitrootlogin %s\nlistenaddress 100.64.0.1:22\nallowusers agent\n" "${STUB_SSHD_PASSWORD:-no}" "${STUB_SSHD_ROOT:-no}" ;; esac'
 stub gh 'case "$1 $2" in
@@ -59,7 +63,8 @@ stub gh 'case "$1 $2" in
   "repo clone") mkdir -p "$4/.git" && touch "$4/package-lock.json" "$4/uv.lock" ;;
 esac'
 # Records each call: its arguments in <n>.args and its standard input in <n>.in.
-stub ssh 'd="$STUB_DIR/ssh"; mkdir -p "$d"; n=$(ls "$d" | wc -l); printf "%s\n" "$*" >"$d/$n.args"; cat >"$d/$n.in"'
+stub ssh 'd="$STUB_DIR/ssh"; mkdir -p "$d"; n=$(ls "$d" | wc -l); printf "%s\n" "$*" >"$d/$n.args"; cat >"$d/$n.in"
+case $* in *"${STUB_SSH_FAIL:-no call matches this}"*) exit 1 ;; esac'
 # Keeps registrations as files, one per server, and lists them the way the real
 # `claude mcp list` does: with each server's URL or full command line.
 stub claude 'reg="$STUB_DIR/claude-registry"; mkdir -p "$reg"
@@ -75,7 +80,8 @@ case "$1 $2" in
       [ -f "$f" ] || continue
       echo "$(basename "$f"): $(jq -r "if .url then .url else ([.command] + (.args // []) + ((.env // {}) | [.[]])) | join(\" \") end" "$f") - ✔ Connected"
     done
-    echo "claude.ai Example: https://claude.ai/mcp?token=CLAUDEAIKEY444 - ! Needs authentication" ;;
+    echo "claude.ai Example: https://claude.ai/mcp?token=CLAUDEAIKEY444 - ! Needs authentication"
+    echo "claude.ai Broken: https://claude.ai/b - ✘ Failed to connect: https://claude.ai/b?token=DIAGKEY666" ;;
 esac'
 
 # ---- fixtures ----------------------------------------------------------------
@@ -153,13 +159,20 @@ expect_refusal "an RC_REPOS entry missing from REPOS is refused" "'web' is not a
 
 fresh_home
 printf 'BOX_USER=from-file\nREPOS="app=org/app"\n' >"$T/box.env"
-out=$(run BOX_ENV_FILE="$T/box.env" BOX_USER= REPOS= bash -c '. "$1" && read_inputs && echo "$BOX_USER ${REPO_DIRS[*]}"' _ "$REPO/scripts/lib.sh" 2>&1 || true)
+out=$(run BOX_ENV_FILE="$T/box.env" bash -c 'unset BOX_USER REPOS; . "$1" && read_inputs && echo "$BOX_USER ${REPO_DIRS[*]}"' _ "$REPO/scripts/lib.sh" 2>&1 || true)
 if [ "$out" = "from-file app" ]; then ok "box.env is read"; else bad "box.env is read" "$out"; fi
 out=$(run BOX_ENV_FILE="$T/box.env" bash -c '. "$1" && read_inputs && echo "$BOX_USER"' _ "$REPO/scripts/lib.sh" 2>&1 || true)
 if [ "$out" = agent ]; then
   ok "an environment variable wins over box.env"
 else
   bad "an environment variable wins over box.env" "$out"
+fi
+printf 'RC_CAPACITY=3\n' >"$T/box.env"
+out=$(run BOX_ENV_FILE="$T/box.env" RC_CAPACITY= bash -c '. "$1" && read_inputs && echo "[$RC_CAPACITY]"' _ "$REPO/scripts/lib.sh" 2>&1 || true)
+if [ "$out" = "[]" ]; then
+  ok "an empty environment variable wins over box.env"
+else
+  bad "an empty environment variable wins over box.env" "$out"
 fi
 
 # ---- the stops at an owner's sign-in -----------------------------------------
@@ -198,6 +211,21 @@ else
   ok "05-remote-control.sh stops when lingering is off, before writing a unit"
 fi
 
+fresh_home
+rc="$T/home/.config/claude-rc"
+mkdir -p "$T/home/Workspace/app" "$rc"
+printf '{ "agent": "writer" }\n' >"$rc/app.json"
+echo writer >"$rc/app.started-agent"
+touch -d '2020-01-01' "$rc/app.json"
+out=$(run REPOS="app=org/app" RC_REPOS="app:writer" STUB_ACTIVE=yes \
+  STUB_PS_ARGS="claude remote-control --spawn same-dir --name app --settings $rc/app.json" \
+  bash "$REPO/scripts/05-remote-control.sh" 2>&1) || true
+if [[ $out != *"app: running, unchanged"* ]] || grep -q 'restart' "$LOG" || [ "$(stat -c %Y "$rc/app.json")" != "$(date -d 2020-01-01 +%s)" ]; then
+  bad "05-remote-control.sh leaves an unchanged server and its settings file alone" "$out"
+else
+  ok "05-remote-control.sh leaves an unchanged server and its settings file alone"
+fi
+
 # ---- 03-repos.sh --clone-only ------------------------------------------------
 
 fresh_home
@@ -216,6 +244,14 @@ if grep -q '^npm ci' "$LOG" && grep -q '^uv sync --frozen' "$LOG"; then
   ok "03-repos.sh without --clone-only installs by lockfile"
 else
   bad "03-repos.sh without --clone-only installs by lockfile" "$out"
+fi
+: >"$LOG"
+if out=$(run STUB_GIT_PULL=1 bash "$REPO/scripts/03-repos.sh" 2>&1); then
+  bad "03-repos.sh stops on a failed pull: exited 0" "$out"
+elif [[ $out != *"app: git pull --ff-only failed"* ]] || grep -qE '^(npm|pnpm|bun) |^uv sync' "$LOG"; then
+  bad "03-repos.sh names a failed pull and installs nothing on top of it" "$out"
+else
+  ok "03-repos.sh names a failed pull and installs nothing on top of it"
 fi
 
 # ---- laptop/push.sh ----------------------------------------------------------
@@ -245,6 +281,9 @@ JSON
   ln -s "$h/.claude.json" "$h/.claude/skills/good/leak"
   echo "notes kept elsewhere" >"$T/elsewhere/notes.md"
   ln -s "$T/elsewhere/notes.md" "$h/.claude/skills/good/notes"
+  ln "$h/.claude.json" "$h/.claude/skills/good/hardleak"
+  mkdir -p "$h/.claude/skills/git-history"
+  echo "a skill about history" >"$h/.claude/skills/git-history/SKILL.md"
   echo "a linked skill" >"$T/elsewhere/linked-skill/SKILL.md"
   ln -s "$T/elsewhere/linked-skill" "$h/.claude/skills/linked"
   echo "$SENTINEL" >"$h/.claude/projects/p/history.jsonl"
@@ -275,6 +314,12 @@ else
 fi
 CHOSEN_JSON="$T/chosen.json"
 cp "$T/ssh/$n.in" "$CHOSEN_JSON" 2>/dev/null || echo '{}' >"$CHOSEN_JSON"
+want=$(jq -S '.mcpServers | with_entries(select(.key | IN("http-header", "http-query", "stdio-env", "mac-path")))' "$T/home/.claude.json")
+if [ "$(jq -S . "$CHOSEN_JSON" 2>/dev/null)" = "$want" ]; then
+  ok "push.sh sends each chosen definition whole"
+else
+  bad "push.sh sends each chosen definition whole" "$(cat "$CHOSEN_JSON")"
+fi
 
 c=$(ssh_call_with tar)
 members=
@@ -283,10 +328,16 @@ if [ -z "$c" ]; then
   bad "push.sh copies the config: no archive sent" "$out"
 elif ! grep -qx 'skills/linked/SKILL.md' <<<"$members" || ! grep -qx 'skills/good/SKILL.md' <<<"$members"; then
   bad "push.sh sends a symlinked skill under its own name" "$members"
-elif grep -q 'leak' <<<"$members" || grep -q "$SENTINEL" "$T/ssh/$c.in"; then
+elif grep -qx 'skills/good/leak' <<<"$members"; then
   bad "push.sh drops a link to a forbidden file" "$members"
 elif [[ $out != *"skills/good/leak"* ]]; then
   bad "push.sh names the dropped link" "$out"
+elif grep -qx 'skills/good/hardleak' <<<"$members" || [[ $out != *"skills/good/hardleak"* ]]; then
+  bad "push.sh drops and names a hard link to ~/.claude.json" "$members"
+elif grep -q "$SENTINEL" "$T/ssh/$c.in"; then
+  bad "push.sh sends no content of a forbidden file" "$members"
+elif ! grep -qx 'skills/git-history/SKILL.md' <<<"$members"; then
+  bad "push.sh sends a skill whose name holds 'history'" "$members"
 elif [[ $out != *"@~/somewhere/else.md"* ]]; then
   bad "push.sh names an import from outside what was sent" "$out"
 else
@@ -301,12 +352,66 @@ fi
 
 push_fixture
 out=$(printf 'yes\n' | run bash "$REPO/laptop/push.sh" agent@box --connectors none 2>&1) || true
-if [ -n "$(ssh_call_with 04-connectors.sh)" ]; then
+n=$(ssh_call_with 04-connectors.sh)
+if [ -z "$n" ] || [ "$(cat "$T/ssh/$n.in")" != "{}" ]; then
   bad "push.sh --connectors none sends no connector" "$out"
 elif [ -z "$(ssh_call_with tar)" ]; then
   bad "push.sh --connectors none still copies the config" "$out"
 else
   ok "push.sh --connectors none sends no connector"
+fi
+
+push_fixture
+out=$(printf 'yes\n' | run bash "$REPO/laptop/push.sh" agent@box --connectors none --exclude "$T/home/.claude/skills/linked" 2>&1) || true
+c=$(ssh_call_with tar)
+members=
+[ -z "$c" ] || members=$(tar -tf "$T/ssh/$c.in" 2>/dev/null || true)
+if [ -z "$c" ] || grep -q '^skills/linked' <<<"$members" || [[ $out != *"skills/linked: excluded"* ]]; then
+  bad "push.sh honours --exclude given as a full path" "$out"$'\n'"$members"
+else
+  ok "push.sh honours --exclude given as a full path"
+fi
+
+push_fixture
+if out=$(printf 'yes\n' | run bash "$REPO/laptop/push.sh" agent@box --connectors none --exclude "$T/elsewhere" 2>&1); then
+  bad "push.sh refuses an --exclude outside ~/.claude: exited 0" "$out"
+elif [ -n "$(ls "$T/ssh" 2>/dev/null)" ] || [[ $out != *"is not under ~/.claude"* ]]; then
+  bad "push.sh refuses an --exclude outside ~/.claude before sending anything" "$out"
+else
+  ok "push.sh refuses an --exclude outside ~/.claude before sending anything"
+fi
+
+push_fixture
+out=$(printf 'yes\n' | run STUB_SSH_FAIL=tar bash "$REPO/laptop/push.sh" agent@box --connectors none 2>&1) || true
+if [[ $out != *"copying the config failed"* ]] || [[ $out == *"Copied into"* ]]; then
+  bad "push.sh reports a failed copy as failed" "$out"
+else
+  ok "push.sh reports a failed copy as failed"
+fi
+
+# A skill added while the confirmation prompt is open was never previewed.
+push_fixture
+mkfifo "$T/answer"
+run bash "$REPO/laptop/push.sh" agent@box --connectors none <"$T/answer" >"$T/push.out" 2>&1 &
+push_pid=$!
+exec 7>"$T/answer"
+for _ in $(seq 40); do
+  grep -q 'Send these to' "$T/push.out" 2>/dev/null && break
+  sleep 0.25
+done
+mkdir -p "$T/home/.claude/skills/late"
+echo "added after the preview" >"$T/home/.claude/skills/late/SKILL.md"
+echo yes >&7
+exec 7>&-
+wait "$push_pid" || true
+rm -f "$T/answer"
+c=$(ssh_call_with tar)
+members=
+[ -z "$c" ] || members=$(tar -tf "$T/ssh/$c.in" 2>/dev/null || true)
+if [ -z "$c" ] || grep -q '^skills/late' <<<"$members"; then
+  bad "push.sh sends only what the preview showed" "$(cat "$T/push.out")"$'\n'"$members"
+else
+  ok "push.sh sends only what the preview showed"
 fi
 
 push_fixture
@@ -322,7 +427,7 @@ fi
 fresh_home
 out=$(run bash "$REPO/scripts/04-connectors.sh" <"$CHOSEN_JSON" 2>&1) || true
 leaked=
-for k in $KEYS CLAUDEAIKEY444 h.example q.example some-server; do [[ $out != *"$k"* ]] || leaked+="$k "; done
+for k in $KEYS CLAUDEAIKEY444 DIAGKEY666 h.example q.example some-server; do [[ $out != *"$k"* ]] || leaked+="$k "; done
 registered=$(find "$T/claude-registry" -mindepth 1 -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ')
 if [ "$registered" != "http-header http-query stdio-env " ]; then
   bad "04-connectors.sh registers the portable servers" "registered: $registered"$'\n'"$out"
@@ -332,6 +437,8 @@ elif [ -n "$leaked" ]; then
   bad "04-connectors.sh prints no key, URL or command line" "printed: $leaked"$'\n'"$out"
 elif [[ $out != *'claude mcp login "claude.ai Example" --no-browser'* ]]; then
   bad "04-connectors.sh names the claude.ai sign-in step" "$out"
+elif [[ $out != *"claude.ai Broken: failed to connect"* ]]; then
+  bad "04-connectors.sh prints a fixed label for a failed connection" "$out"
 else
   ok "04-connectors.sh registers the portable servers, skips the macOS one, prints no value"
 fi
@@ -344,8 +451,18 @@ if [ "$(registry_state)" != "$before" ]; then
   bad "04-connectors.sh run twice leaves the existing registrations alone" "$out"
 elif [ "$(grep -c 'already registered' <<<"$out")" != 3 ]; then
   bad "04-connectors.sh run twice names the existing registrations" "$out"
+elif [[ $out != *"    http-header: connected"* || $out != *"    stdio-env: connected"* ]]; then
+  bad "04-connectors.sh run twice still lists the existing registrations' status" "$out"
 else
   ok "04-connectors.sh run twice leaves the existing registrations alone and names them"
+fi
+
+fresh_home
+out=$(printf '{"bad": {"command": "x", "args": "SECRETARGS777"}}' | run bash "$REPO/scripts/04-connectors.sh" 2>&1) || true
+if [[ $out == *SECRETARGS777* ]] || [[ $out != *"bad: skipped – the definition is not in the form"* ]] || [ -e "$T/claude-registry/bad" ]; then
+  bad "04-connectors.sh skips a malformed definition without printing it" "$out"
+else
+  ok "04-connectors.sh skips a malformed definition without printing it"
 fi
 
 # ---- keys: base and handover -------------------------------------------------
@@ -362,6 +479,13 @@ elif ! grep -qF "$OTHERKEY" "$T/keys/user_ak"; then
   bad "base leaves an unrelated key in place" "$(cat "$T/keys/user_ak")"
 else
   ok "base adds the operator's key once and leaves an unrelated key"
+fi
+printf '# %s\n%s\n' "$OPKEY" "$OTHERKEY" >"$T/keys/user_ak"
+out=$(grant)
+if [ "$(grep -v '^#' "$T/keys/user_ak" | grep -c -F "$OP_BLOB")" != 1 ]; then
+  bad "base adds the key when only a commented-out copy is there" "$out"$'\n'"$(cat "$T/keys/user_ak")"
+else
+  ok "base adds the key when only a commented-out copy is there"
 fi
 mkdir -p "$T/state"
 touch "$T/state/handed-over"
@@ -407,6 +531,17 @@ if grep -qF "$OP_BLOB" "$T/keys/user_ak"; then
 else
   ok "after handover, base does not grant the operator's key again"
 fi
+
+handover_fixture
+chmod 555 "$T/keys"
+if out=$(run STUB_UID=0 bash "$REPO/scripts/06-handover.sh" 2>&1); then
+  bad "handover stops when a key file can't be rewritten: exited 0" "$out"
+elif [[ $out != *"could not rewrite"* ]] || [[ $out == *"Handover done"* ]]; then
+  bad "handover stops when a key file can't be rewritten" "$out"
+else
+  ok "handover stops when a key file can't be rewritten"
+fi
+chmod 755 "$T/keys"
 
 handover_fixture
 rm -f "$T/state/closed"
@@ -475,6 +610,23 @@ expect_refusal "a handover while a revert is armed refuses" "still armed" STUB_U
 wait_lock_free || bad "the armed revert released its lock after running"
 
 close_fixture
+mkfifo "$T/close-answers"
+run STUB_UID=0 REVERT_AFTER=1 bash "$REPO/scripts/02-tailscale-lockdown.sh" close <"$T/close-answers" >"$T/close1.out" 2>&1 &
+close_pid=$!
+exec 7>"$T/close-answers"
+echo yes >&7
+revert_ran
+out2=$(echo no | run STUB_UID=0 bash "$REPO/scripts/02-tailscale-lockdown.sh" close 2>&1) || true
+exec 7>&-
+wait "$close_pid" || true
+rm -f "$T/close-answers"
+if [[ $out2 == *"still armed"* ]] || [[ $out2 != *"Aborting."* ]]; then
+  bad "once the revert has run, a new close isn't refused while the first prompt is open" "$out2"
+else
+  ok "once the revert has run, a new close isn't refused while the first prompt is open"
+fi
+
+close_fixture
 printf '%s\n%s\n' "$OPKEY" "$OTHERKEY" >"$T/keys/root_ak"
 printf '%s\n%s\n' "$OPKEY" "$OTHERKEY" >"$T/keys/user_ak"
 out=$({ echo yes; echo yes; } | run STUB_UID=0 REVERT_AFTER=20 bash "$REPO/scripts/02-tailscale-lockdown.sh" close 2>&1) && rc=0 || rc=$?
@@ -484,6 +636,11 @@ elif ! out2=$(run STUB_UID=0 bash "$REPO/scripts/06-handover.sh" 2>&1); then
   bad "a handover straight after a confirmed close is not refused" "$out2"
 else
   ok "a timely yes writes the marker, and a handover straight after is not refused"
+fi
+if grep -q '^apt' "$LOG"; then
+  bad "the close runs no apt inside its revert window" "$(cat "$LOG")"
+else
+  ok "the close runs no apt inside its revert window"
 fi
 # The lock is free only once the revert job is gone, and only that job can revert.
 if ! lock_free || [ ! -e "$T/sshd/d/99-tailscale.conf" ] || grep -q '^ufw --force disable' "$LOG"; then
@@ -503,4 +660,4 @@ fi
 
 echo
 echo "$pass passed, $fail failed"
-[ "$fail" -eq 0 ]
+[ "$fail" -eq 0 ] || exit 1

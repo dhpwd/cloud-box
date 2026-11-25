@@ -75,26 +75,36 @@ for i in "${!RC_DIRS[@]}"; do
   agent=${RC_AGENTS[$i]}
   unit="claude-rc@$r.service"
 
+  # The server reads its arguments and settings file once, at start, and once
+  # the file changes it starts no session until it is restarted. So the file is
+  # written only when its content differs, and any write means a restart.
+  # Sessions run as this user and can edit the file too: the next run of this
+  # script puts it back and restarts the server.
   f="$conf/$r.json"
+  wrote=
   if [ -n "$agent" ]; then
-    printf '{ "agent": "%s" }\n' "$agent" >"$f"
-  else
+    desired=$(printf '{ "agent": "%s" }' "$agent")
+    if [ "$(cat "$f" 2>/dev/null)" != "$desired" ]; then
+      printf '%s\n' "$desired" >"$f"
+      wrote=1
+    fi
+  elif [ -e "$f" ]; then
     rm -f "$f"
+    wrote=1
   fi
 
-  # The server reads its arguments and settings file once, at start, and a
-  # daemon-reload doesn't reach a running process, so a changed setting means a
-  # restart. The arguments are compared on the running process itself. The
-  # agent it was started with is recorded once it has started, so a run that
-  # stopped between writing the settings file and the restart still restarts.
+  # A daemon-reload doesn't reach a running process, so the arguments are
+  # compared on the running process itself. The agent it was started with is
+  # recorded once it has started, so a run that stopped between writing the
+  # settings file and the restart still restarts.
   want="claude remote-control $flags --name $r"
   [ -z "$agent" ] || want+=" --settings $f"
   stamp="$conf/$r.started-agent"
   systemctl --user enable --quiet "$unit"
   if systemctl --user is-active --quiet "$unit"; then
     pid=$(systemctl --user show -p MainPID --value "$unit")
-    have=$(ps -o args= -p "$pid" 2>/dev/null || true)
-    if [ "$have" = "$want" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$agent" ]; then
+    have=$(ps -ww -o args= -p "$pid" 2>/dev/null || true)
+    if [ -z "$wrote" ] && [ "$have" = "$want" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$agent" ]; then
       echo "==> $r: running, unchanged"
       continue
     fi
