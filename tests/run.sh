@@ -40,7 +40,8 @@ stub() {
   chmod +x "$STUBS/$1"
 }
 
-for c in apt apt-get ufw bun pnpm npm pre-commit journalctl scp; do stub "$c"; done
+for c in apt apt-get bun pnpm npm pre-commit journalctl scp; do stub "$c"; done
+stub ufw 'case "$1 $2" in "--force reset") [ -z "${STUB_UFW_SLOW:-}" ] || sleep 3 ;; esac'
 for c in curl sudo dpkg adduser useradd usermod gpasswd passwd locale-gen update-locale getent; do
   stub "$c" 'echo "stub: $0 must not run in tests" >&2; exit 1'
 done
@@ -52,7 +53,7 @@ stub id 'case $1 in -u) echo "${STUB_UID:-1000}" ;; -un) echo "${STUB_USER:-agen
 stub runuser 'while [ "$1" != -- ]; do shift; done; shift; exec "$@"'
 stub loginctl 'echo "${STUB_LINGER:-yes}"'
 stub systemctl 'case $* in *is-active*) [ "${STUB_ACTIVE:-no}" = yes ] ;; *show*) echo 4242 ;; esac'
-stub ps 'printf "%s\n" "${STUB_PS_ARGS:-}"'
+stub ps 'case " $* " in *" -ww "*) printf "%s\n" "${STUB_PS_ARGS:-}" ;; *) printf "%s\n" "${STUB_PS_ARGS:0:40}" ;; esac'
 # Real git for everything but pull, which would reach a network or, from an
 # empty .git, a repository above the temporary directory.
 stub git 'for a; do [ "$a" != pull ] || exit "${STUB_GIT_PULL:-0}"; done; exec /usr/bin/git "$@"'
@@ -281,7 +282,11 @@ JSON
   ln -s "$h/.claude.json" "$h/.claude/skills/good/leak"
   echo "notes kept elsewhere" >"$T/elsewhere/notes.md"
   ln -s "$T/elsewhere/notes.md" "$h/.claude/skills/good/notes"
-  ln "$h/.claude.json" "$h/.claude/skills/good/hardleak"
+  mkdir -p "$h/.ssh"
+  echo "$SENTINEL private key" >"$h/.ssh/id_test"
+  ln "$h/.ssh/id_test" "$h/.claude/skills/good/sshlink"
+  echo "$SENTINEL commands" >"$T/elsewhere/fish_history"
+  ln -s "$T/elsewhere/fish_history" "$h/.claude/skills/good/fishlink"
   mkdir -p "$h/.claude/skills/git-history"
   echo "a skill about history" >"$h/.claude/skills/git-history/SKILL.md"
   echo "a linked skill" >"$T/elsewhere/linked-skill/SKILL.md"
@@ -332,8 +337,10 @@ elif grep -qx 'skills/good/leak' <<<"$members"; then
   bad "push.sh drops a link to a forbidden file" "$members"
 elif [[ $out != *"skills/good/leak"* ]]; then
   bad "push.sh names the dropped link" "$out"
-elif grep -qx 'skills/good/hardleak' <<<"$members" || [[ $out != *"skills/good/hardleak"* ]]; then
-  bad "push.sh drops and names a hard link to ~/.claude.json" "$members"
+elif grep -qx 'skills/good/sshlink' <<<"$members" || [[ $out != *"skills/good/sshlink: has other hard links"* ]]; then
+  bad "push.sh drops and names a hard link to a file in ~/.ssh" "$members"
+elif grep -qx 'skills/good/fishlink' <<<"$members"; then
+  bad "push.sh drops a link to a shell history file" "$members"
 elif grep -q "$SENTINEL" "$T/ssh/$c.in"; then
   bad "push.sh sends no content of a forbidden file" "$members"
 elif ! grep -qx 'skills/git-history/SKILL.md' <<<"$members"; then
@@ -387,6 +394,28 @@ if [[ $out != *"copying the config failed"* ]] || [[ $out == *"Copied into"* ]];
   bad "push.sh reports a failed copy as failed" "$out"
 else
   ok "push.sh reports a failed copy as failed"
+fi
+
+# A file replaced while the confirmation prompt is open is not the one previewed.
+push_fixture
+mkfifo "$T/answer"
+run bash "$REPO/laptop/push.sh" agent@box --connectors none <"$T/answer" >"$T/push.out" 2>&1 &
+push_pid=$!
+exec 7>"$T/answer"
+for _ in $(seq 40); do
+  grep -q 'Send these to' "$T/push.out" 2>/dev/null && break
+  sleep 0.25
+done
+rm "$T/home/.claude/skills/good/SKILL.md"
+echo "a different file under the same name" >"$T/home/.claude/skills/good/SKILL.md"
+echo yes >&7
+exec 7>&-
+wait "$push_pid" || true
+rm -f "$T/answer"
+if ! grep -q 'skills/good/SKILL.md changed after the preview' "$T/push.out" || grep -q 'Copied into' "$T/push.out"; then
+  bad "push.sh stops when a file changed after the preview" "$(cat "$T/push.out")"
+else
+  ok "push.sh stops when a file changed after the preview"
 fi
 
 # A skill added while the confirmation prompt is open was never previewed.
@@ -446,7 +475,8 @@ fi
 # shows as a change.
 registry_state() { { find "$T/claude-registry" -type f -printf '%f %T@\n' | sort && cat "$T"/claude-registry/*; } 2>/dev/null || true; }
 before=$(registry_state)
-out=$(run bash "$REPO/scripts/04-connectors.sh" <"$CHOSEN_JSON" 2>&1) || true
+jq '."stdio-env".command = "/Users/someone/bin/server"' "$CHOSEN_JSON" >"$T/rerun.json"
+out=$(run bash "$REPO/scripts/04-connectors.sh" <"$T/rerun.json" 2>&1) || true
 if [ "$(registry_state)" != "$before" ]; then
   bad "04-connectors.sh run twice leaves the existing registrations alone" "$out"
 elif [ "$(grep -c 'already registered' <<<"$out")" != 3 ]; then
@@ -458,8 +488,10 @@ else
 fi
 
 fresh_home
-out=$(printf '{"bad": {"command": "x", "args": "SECRETARGS777"}}' | run bash "$REPO/scripts/04-connectors.sh" 2>&1) || true
-if [[ $out == *SECRETARGS777* ]] || [[ $out != *"bad: skipped – the definition is not in the form"* ]] || [ -e "$T/claude-registry/bad" ]; then
+out=$(printf '{"bad": {"command": "x", "args": "SECRETARGS777"}, "bad2": {"command": "x", "args": [{"k": "SECRETARGS888"}]}}' |
+  run bash "$REPO/scripts/04-connectors.sh" 2>&1) || true
+if [[ $out == *SECRETARGS* ]] || [[ $out != *"bad: skipped – the definition is not in the form"* ]] ||
+  [[ $out != *"bad2: skipped – the definition is not in the form"* ]] || [ -e "$T/claude-registry/bad" ] || [ -e "$T/claude-registry/bad2" ]; then
   bad "04-connectors.sh skips a malformed definition without printing it" "$out"
 else
   ok "04-connectors.sh skips a malformed definition without printing it"
@@ -486,6 +518,22 @@ if [ "$(grep -v '^#' "$T/keys/user_ak" | grep -c -F "$OP_BLOB")" != 1 ]; then
   bad "base adds the key when only a commented-out copy is there" "$out"$'\n'"$(cat "$T/keys/user_ak")"
 else
   ok "base adds the key when only a commented-out copy is there"
+fi
+printf '%s ssh-ed25519 %s\n' "$OTHERKEY" "$OP_BLOB" >"$T/keys/user_ak"
+out=$(grant)
+if ! grep -qxF "$OPKEY" "$T/keys/user_ak"; then
+  bad "base adds the key when another key's comment holds it" "$out"$'\n'"$(cat "$T/keys/user_ak")"
+else
+  ok "base adds the key when another key's comment holds it"
+fi
+# A directory where the key file should be: no write to it can succeed.
+mkdir -p "$T/userkeys/akdir"
+if out=$(run USER_AUTHORIZED_KEYS="$T/userkeys/akdir" bash -c '. "$1" && read_inputs && grant_operator_key' _ "$REPO/scripts/lib.sh" 2>&1); then
+  bad "base stops when the box user's key file can't be written: exited 0" "$out"
+elif [[ $out == *"added the operator's key"* ]]; then
+  bad "base stops when the box user's key file can't be written" "$out"
+else
+  ok "base stops when the box user's key file can't be written"
 fi
 mkdir -p "$T/state"
 touch "$T/state/handed-over"
@@ -542,6 +590,26 @@ else
   ok "handover stops when a key file can't be rewritten"
 fi
 chmod 755 "$T/keys"
+
+handover_fixture
+printf '%s\n' "$OPKEY" >"$T/userkeys/ak"
+chmod 000 "$T/userkeys"
+if out=$(run STUB_UID=0 USER_AUTHORIZED_KEYS="$T/userkeys/ak" bash "$REPO/scripts/06-handover.sh" 2>&1); then
+  bad "handover stops when the box user's key file can't be read: exited 0" "$out"
+elif [[ $out == *"Handover done"* ]]; then
+  bad "handover stops when the box user's key file can't be read" "$out"
+else
+  ok "handover stops when the box user's key file can't be read"
+fi
+chmod 700 "$T/userkeys"
+handover_fixture
+printf '%s ssh-ed25519 %s\n' "$OTHERKEY" "$OP_BLOB" >"$T/keys/user_ak"
+out=$(run STUB_UID=0 bash "$REPO/scripts/06-handover.sh" 2>&1) || true
+if ! grep -qF "$OTHER_BLOB" "$T/keys/user_ak"; then
+  bad "handover keeps a key whose comment holds the operator's key" "$out"
+else
+  ok "handover keeps a key whose comment holds the operator's key"
+fi
 
 handover_fixture
 rm -f "$T/state/closed"
@@ -608,6 +676,18 @@ mkdir -p "$T/state"
 touch "$T/state/closed"
 expect_refusal "a handover while a revert is armed refuses" "still armed" STUB_UID=0 bash "$REPO/scripts/06-handover.sh"
 wait_lock_free || bad "the armed revert released its lock after running"
+
+close_fixture
+out=$({ echo yes; sleep 5; } | run STUB_UID=0 STUB_UFW_SLOW=1 REVERT_AFTER=1 bash "$REPO/scripts/02-tailscale-lockdown.sh" close 2>&1) && rc=0 || rc=$?
+wait_lock_free || true
+after_revert=$(sed -n '/^ufw --force disable/,$p' "$LOG" | grep -c '^ufw' || true)
+if [ "$rc" -eq 0 ] || [[ $out != *"Public SSH is open again"* ]]; then
+  bad "a revert that fires mid-close stops the close and says so" "$out"
+elif ! grep -q '^ufw --force disable' "$LOG" || [ "$after_revert" != 1 ]; then
+  bad "a revert that fires mid-close is the last to touch the firewall" "$(cat "$LOG")"
+else
+  ok "a revert that fires mid-close stops the close and is the last to touch the firewall"
+fi
 
 close_fixture
 mkfifo "$T/close-answers"

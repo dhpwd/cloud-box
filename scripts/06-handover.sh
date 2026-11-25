@@ -46,7 +46,8 @@ echo "--- every firewall rule, IPv4 and IPv6"
 if command -v nft >/dev/null; then
   nft list ruleset || unreadable
 else
-  { iptables -S && ip6tables -S; } || unreadable
+  iptables -S || unreadable
+  ip6tables -S || unreadable
 fi
 
 cat <<MSG

@@ -17,13 +17,8 @@ require_root
 
 DROPIN="$SSHD_CONFIG_D/99-tailscale.conf"
 # Whichever of the confirmation and the revert creates this first wins, and the
-# other stands down, so a late "yes" can't report a close the revert undid. One
-# per run, so a prompt left open by an earlier close can't settle a later one.
-DECIDED="$CLOUD_BOX_RUN_DIR/decided.$$"
-
-stop_if_reverted() {
-  [ ! -e "$DECIDED" ] || die "${REVERT_AFTER}s ran out before the close finished, and the revert has reopened public SSH. Run 'close' again."
-}
+# other stands down, so a late "yes" can't report a close the revert undid.
+DECIDED="$CLOUD_BOX_RUN_DIR/decided"
 
 phase_up() {
   if ! command -v tailscale >/dev/null; then
@@ -55,9 +50,10 @@ MSG
 }
 
 phase_close() {
-  # Before anything else, so a second close can't arm a second revert while the
-  # first is still counting down.
-  take_close_lock "a revert from an earlier 'close' is still armed. Wait for it to run (public SSH is then open again), then run 'close' again."
+  # Before anything else, and held until this script exits, so a second close
+  # or a handover can't start while this one runs or its revert is armed.
+  take_close_lock "a close is running, or the revert from an earlier one is still armed. Wait for it to finish (public SSH is then open again), then run 'close' again."
+  rm -rf "$DECIDED"
 
   command -v tailscale >/dev/null || { echo "Tailscale not installed – run 'up' first" >&2; exit 1; }
   TS_IP=$(tailscale ip -4)
@@ -71,24 +67,30 @@ phase_close() {
 
   # Dead-man switch. Everything below is undone in REVERT_AFTER seconds unless
   # the script reaches the end and cancels it. A wrong rule then locks you out
-  # for five minutes instead of until you can reach the web console. The job
-  # holds the lock (fd 9) until it has run or been killed, and this script lets
-  # go of it once the job is armed, so the lock is free the moment the revert
-  # has run, even with the prompt below still open. The job's sleep doesn't
-  # hold it, so killing the job frees the lock at once.
+  # for five minutes instead of until you can reach the web console.
+  #
+  # The revert is always the last to change anything. When it fires, it stops
+  # this script and whatever this script is running, then undoes the close, so
+  # a step that stalled past the deadline can't land after the undo. It runs in
+  # a session of its own, so stopping this script doesn't stop it. It holds the
+  # lock (fd 9) until it has run or been killed. Its first sleep doesn't hold
+  # the lock, so killing the job frees the lock at once.
   REVERT_AFTER="${REVERT_AFTER:-300}"
   rm -f "$CLOSED_MARKER"
   # shellcheck disable=SC2016 # the job's $1.. are the arguments after the script
-  nohup bash -c 'sleep "$1" 9>&-
+  nohup setsid bash -c 'sleep "$1" 9>&-
     mkdir "$2" 2>/dev/null || exit 0
+    for c in $(pgrep -P "$5"); do [ "$c" = "$$" ] || kill -TERM "$c" 2>/dev/null; done
+    kill -TERM "$5" 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$5" 2>/dev/null || break; sleep 0.5; done
+    kill -KILL "$5" 2>/dev/null
     rm -f "$3" "$4"
     systemctl restart ssh
-    ufw --force disable' _ "$REVERT_AFTER" "$DECIDED" "$DROPIN" "$CLOSED_MARKER" >/dev/null 2>&1 &
+    ufw --force disable' _ "$REVERT_AFTER" "$DECIDED" "$DROPIN" "$CLOSED_MARKER" "$$" >/dev/null 2>&1 &
   REVERT_PID=$!
-  exec 9>&-
+  trap 'echo "!! ${REVERT_AFTER}s ran out, so the revert stopped the close and reopened public SSH. Public SSH is open again. Run close again." >&2; exit 1' TERM
   echo "==> Auto-revert armed for ${REVERT_AFTER}s (pid $REVERT_PID)"
 
-  stop_if_reverted
   echo "==> Binding sshd to $TS_IP only"
   # These settings govern sshd alone. Tailscale SSH is a separate listener that
   # never reads them: its control is the tailnet's SSH policy.
@@ -102,7 +104,6 @@ CONF
   sshd -t
   systemctl restart ssh
 
-  stop_if_reverted
   echo "==> Host firewall: allow only Tailscale"
   ufw --force reset
   ufw default deny incoming
@@ -126,6 +127,7 @@ CONF
     echo "!! Run 'close' again." >&2
     exit 1
   fi
+  trap - TERM
   kill "$REVERT_PID" 2>/dev/null || true
   wait "$REVERT_PID" 2>/dev/null || true
   mkdir -p "$CLOUD_BOX_STATE_DIR"

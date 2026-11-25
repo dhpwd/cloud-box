@@ -69,7 +69,7 @@ command -v git >/dev/null || die "git is missing on this laptop"
 python3 -c '' >/dev/null 2>&1 || die "python3 is missing on this laptop. On a Mac: xcode-select --install"
 
 read -r -d '' PY <<'PYEOF' || true
-import json, os, re, sys, tarfile
+import json, os, re, stat, sys, tarfile
 
 mode = sys.argv[1]
 chosen = [n.strip() for n in sys.argv[2].split(",") if n.strip()]
@@ -80,7 +80,7 @@ CLAUDE_JSON = os.path.join(HOME, ".claude.json")
 TOP_FILES = ["CLAUDE.md", "settings.json", "keybindings.json"]
 TOP_DIRS = ["skills", "agents", "commands", "rules", "output-styles", "hooks"]
 SKIP = {".DS_Store", ".git", "node_modules", "__pycache__"}
-HISTORY = re.compile(r"^(history\.jsonl|\.[A-Za-z0-9_]*history)$", re.I)
+HISTORY = re.compile(r"^(history\.jsonl|\.?[A-Za-z0-9_]*history|.+\.history)$", re.I)
 MANIFEST = os.environ.get("PUSH_MANIFEST", "")
 
 
@@ -152,7 +152,9 @@ def forbidden(rp):
 
 
 def collect():
-    """Return (sent, dropped): sent is [(real path, name under ~/.claude)]."""
+    """Return (sent, dropped): sent is [(real path, name under ~/.claude, device,
+    inode)]. A file with more than one hard link is left out: its other names
+    can't be checked against what may not be sent."""
     sent, dropped = [], []
 
     def add(lp, name, stack):
@@ -175,7 +177,11 @@ def collect():
                 if entry not in SKIP:
                     add(os.path.join(lp, entry), name + "/" + entry, stack | {rp})
         elif os.path.isfile(lp):
-            sent.append((rp, name))
+            st = os.stat(rp)
+            if st.st_nlink > 1:
+                dropped.append((name, "has other hard links, so where else it lives can't be checked"))
+            else:
+                sent.append((rp, name, st.st_dev, st.st_ino))
         else:
             dropped.append((name, "not a regular file"))
 
@@ -214,13 +220,13 @@ def preview():
     sent, dropped = collect()
     with open(MANIFEST, "w") as fh:
         json.dump(sent, fh)
-    keys = list(dict.fromkeys(entry_key(n) for _, n in sent))
+    keys = list(dict.fromkeys(entry_key(e[1]) for e in sent))
     print("Config, copied into ~/.claude on the box:")
     for k in keys:
         print("  " + shown(k))
     if not keys:
         print("  (nothing)")
-    linked = [(n, rp) for rp, n in sent if not under(rp, real(os.path.join(CLAUDE, entry_key(n))))]
+    linked = [(e[1], e[0]) for e in sent if not under(e[0], real(os.path.join(CLAUDE, entry_key(e[1]))))]
     if linked:
         print("Reached through a symlink inside those. Check each target:")
         for n, rp in linked:
@@ -252,14 +258,25 @@ def strip_owner(info):
 
 def approved():
     with open(MANIFEST) as fh:
-        return [tuple(pair) for pair in json.load(fh)]
+        return [tuple(e) for e in json.load(fh)]
 
 
+# Each file is sent only if it is still the one the preview showed: the same
+# device and inode before anything is written, and again on the file as opened.
 def archive():
+    files = approved()
+    for rp, name, dev, ino in files:
+        st = os.lstat(rp) if os.path.lexists(rp) else None
+        if st is None or not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != (dev, ino):
+            sys.exit("!! %s changed after the preview, so nothing was sent. Run this again" % name)
     with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as tf:
-        for rp, name in approved():
-            if os.path.isfile(rp) and not os.path.islink(rp):
-                tf.add(rp, arcname=name, recursive=False, filter=strip_owner)
+        for rp, name, dev, ino in files:
+            fd = os.open(rp, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(fd, "rb") as fh:
+                st = os.fstat(fh.fileno())
+                if (st.st_dev, st.st_ino) != (dev, ino):
+                    sys.exit("!! %s changed while it was being sent. Run this again" % name)
+                tf.addfile(strip_owner(tf.gettarinfo(arcname=name, fileobj=fh)), fh)
 
 
 IMPORT = re.compile(r"(?<![\w.@])@((?:~|\$HOME|\$\{HOME\}|\.{1,2})?/[^\s'\"`)\]>,;]+|[^\s'\"`)\]>,;@]+\.md)")
@@ -284,9 +301,9 @@ def expand(p, base):
 
 def report():
     sent = approved()
-    names = [n for _, n in sent]
+    names = [e[1] for e in sent]
     users, outside = [], []
-    for rp, name in sent:
+    for rp, name, _, _ in sent:
         try:
             with open(rp, encoding="utf-8") as fh:
                 text = fh.read()
@@ -318,7 +335,7 @@ def report():
         for n, found in outside:
             more = " (+%d more)" % (len(found) - 5) if len(found) > 5 else ""
             print("  %s: %s%s" % (n, ", ".join(found[:5]), more))
-    settings = next((rp for rp, n in sent if n == "settings.json"), None)
+    settings = next((e[0] for e in sent if e[1] == "settings.json"), None)
     if settings:
         try:
             with open(settings) as fh:

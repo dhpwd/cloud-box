@@ -126,7 +126,7 @@ A repo's own tracked `.mcp.json` arrives with its clone. If it reads environment
 
 ### 5. Config, connectors and files (owner's laptop)
 
-The laptop takes `push.sh` from the box, so it is always the revision the box is running. If the checkout isn't at `/opt/cloud-box`, set `BOX_REPO` to its path in front of `/bin/bash`:
+The laptop takes `push.sh` from the box, so it is always the revision the box is running. If the checkout isn't at `/opt/cloud-box`, use its path in the `scp` and set `BOX_REPO` to it in front of `/bin/bash`:
 
 ```bash
 ( d=$(mktemp -d) || exit 1; trap 'rm -rf "$d"' EXIT; scp <box user>@<box name>:/opt/cloud-box/laptop/push.sh "$d/push.sh" && /bin/bash "$d/push.sh" <box user>@<box name> --connectors <name,name> )
@@ -244,13 +244,15 @@ As root, add it to `REPOS` (and `RC_REPOS`, if that is set) in `/opt/cloud-box/b
 
 Every script is safe to run again and stops, naming the step to resume, when something it needs is missing.
 
+One rule wherever a setup stops: if the owner's laptop has reached the box over the tailnet and public SSH is still open, run the close before leaving, so nothing waits on a public port. If the close is already confirmed (an owner building their own box does it straight after step 2), leave it alone: running it again arms a revert that reopens public SSH unless it is confirmed again. The operator's key stays until the handover, whatever step the setup stops at.
+
 - **After step 1:** public SSH is key-only, the operator's key is on the box user, and nothing of the owner's is on the box
-- **After step 2:** Tailscale is up on the owner's tailnet and public SSH is still open, key-only. If the owner's laptop has connected over the tailnet, run the close before leaving, so nothing waits on a public port. The operator's key stays until the handover, whatever step the setup stops at
-- **After step 3:** the owner's Claude and GitHub sign-ins are on the box. Close public SSH before leaving
+- **After step 2:** Tailscale is up on the owner's tailnet, and public SSH is still open, key-only, unless the close has been run
+- **After step 3:** the owner's Claude and GitHub sign-ins are on the box
 - **After step 4:** the repos are cloned. A repo left at `--clone-only` has no dependencies yet: run `03-repos.sh` again once its env file is in place
 - **After step 5:** the config, connectors and git identity are on the box. Running `push.sh` again overwrites files of the same name and leaves registered connectors alone
 - **After steps 6 and 7:** any repo whose trust step was missed has no running server. `05-remote-control.sh` names it, and running it again after the trust step starts it
-- **After step 8:** the box is in use, with public SSH still open. Run the close
+- **After step 8:** the box is in use
 - **After step 9, before step 10:** the box is closed but the operator's key is still on it. The owner runs `06-handover.sh` as root over Tailscale SSH
 
 ## Getting back in, and getting help

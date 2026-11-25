@@ -34,9 +34,25 @@ registered=()
 for name in ${names[@]+"${names[@]}"}; do
   def=$(printf '%s' "$input" | jq -c --arg n "$name" '.[$n]')
 
+  # A server kept as it is on the box is reported on as it is there, so
+  # nothing below checks the definition that was sent for it.
+  existing=
+  if claude mcp get "$name" >/dev/null 2>&1; then
+    if [ -z "$REPLACE" ]; then
+      echo "    $name: already registered – left as it is (--replace replaces it)"
+      registered+=("$name")
+      continue
+    fi
+    existing=1
+  fi
+
   # jq's error messages quote the value they failed on, so they go nowhere.
-  if ! printf '%s' "$def" | jq -e 'type == "object" and ((.command // "") | type == "string")
-      and ((.args // []) | type == "array") and ((.env // {}) | type == "object")' >/dev/null 2>&1; then
+  if ! printf '%s' "$def" | jq -e 'type == "object"
+      and ((.args // []) | type == "array" and all(type == "string"))
+      and ((.env // {}) | type == "object" and all(.[]; type == "string"))
+      and ((.headers // {}) | type == "object" and all(.[]; type == "string"))
+      and (if (.type // "stdio") == "stdio" then (.command | type == "string") else (.url | type == "string") end)' \
+      >/dev/null 2>&1; then
     echo "    $name: skipped – the definition is not in the form ~/.claude.json uses"
     attention=1
     continue
@@ -62,12 +78,7 @@ for name in ${names[@]+"${names[@]}"}; do
   done
 
   replaced=
-  if claude mcp get "$name" >/dev/null 2>&1; then
-    if [ -z "$REPLACE" ]; then
-      echo "    $name: already registered – left as it is (--replace replaces it)"
-      registered+=("$name")
-      continue
-    fi
+  if [ -n "$existing" ]; then
     if ! claude mcp remove --scope user "$name" >/dev/null 2>&1; then
       echo "    $name: failed – could not remove the existing registration, which is left as it is"
       attention=1

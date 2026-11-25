@@ -184,10 +184,53 @@ key_blob() {
   printf '%s\n' "$1" | awk '{ for (i = 1; i < NF; i++) if ($i ~ /^(ssh-|ecdsa-|sk-)/) { print $(i + 1); exit } }'
 }
 
-# Marks (hit) an active authorized_keys line holding key k, judged by the field
-# after the key type, so neither a comment nor a commented-out line counts.
+# Marks (hit) an active authorized_keys line whose key is k. A line is
+# [options] keytype base64 [comment]: the options field, which may hold quoted
+# spaces, is skipped, and nothing after the key counts, so neither a comment
+# nor a commented-out line can match.
 # shellcheck disable=SC2016
-KEY_LINE='{ hit = 0 } !/^[[:space:]]*#/ { for (i = 1; i < NF; i++) if ($i ~ /^(ssh-|ecdsa-|sk-)/ && $(i + 1) == k) hit = 1 }'
+KEY_LINE='
+{ hit = 0 }
+!/^[[:space:]]*(#|$)/ {
+  line = $0
+  sub(/^[[:space:]]+/, "", line)
+  if (line !~ /^(ssh-|ecdsa-|sk-)/) {
+    q = 0
+    for (i = 1; i <= length(line); i++) {
+      c = substr(line, i, 1)
+      if (c == "\\") i++
+      else if (c == "\"") q = !q
+      else if (!q && (c == " " || c == "\t")) break
+    }
+    line = substr(line, i + 1)
+    sub(/^[[:space:]]+/, "", line)
+  }
+  nf = split(line, f, /[[:space:]]+/)
+  hit = nf >= 2 && f[1] ~ /^(ssh-|ecdsa-|sk-)/ && f[2] == k
+}'
+
+# absent, present or unreadable. A key file that can't be read is never taken
+# for one without the key.
+key_file_state() {
+  local d
+  if [ -e "$1" ]; then
+    if [ -r "$1" ]; then echo present; else echo unreadable; fi
+    return
+  fi
+  d=$(dirname "$1")
+  while [ ! -e "$d" ]; do d=$(dirname "$d"); done
+  if [ -x "$d" ]; then echo absent; else echo unreadable; fi
+}
+
+# Succeeds only when the file provably doesn't exist, or is readable and holds
+# no active copy of the key.
+key_absent() {
+  case $(key_file_state "$1") in
+    absent) return 0 ;;
+    present) ! file_has_key "$1" "$2" ;;
+    *) return 1 ;;
+  esac
+}
 
 file_has_key() {
   [ -f "$1" ] && awk -v k="$2" "$KEY_LINE"' hit { found = 1 } END { exit !found }' "$1"
@@ -214,10 +257,16 @@ add_key() {
 remove_key() {
   local file=$1 blob tmp n
   blob=$(key_blob "$2")
-  if [ ! -f "$file" ]; then
-    echo "    $file does not exist"
-    return 0
-  fi
+  case $(key_file_state "$file") in
+    absent)
+      echo "    $file does not exist"
+      return 0
+      ;;
+    unreadable)
+      echo "!! cannot read $file" >&2
+      return 1
+      ;;
+  esac
   n=$(awk -v k="$blob" "$KEY_LINE"' hit { n++ } END { print n + 0 }' "$file")
   if ! tmp=$(mktemp "$file.XXXXXX") ||
     ! awk -v k="$blob" "$KEY_LINE"' !hit { print }' "$file" >"$tmp" ||
@@ -256,8 +305,8 @@ revoke_operator_key() {
   blob=$(key_blob "$OPERATOR_PUBKEY")
   remove_key "$ROOT_AUTHORIZED_KEYS" "$OPERATOR_PUBKEY" || die "the operator's key may still be in $ROOT_AUTHORIZED_KEYS"
   as_box_user_lib remove_key "$file" "$OPERATOR_PUBKEY" || die "the operator's key may still be in $file"
-  if file_has_key "$ROOT_AUTHORIZED_KEYS" "$blob" || as_box_user_lib file_has_key "$file" "$blob"; then
-    die "the operator's key is still in an authorized_keys file, so the handover is not complete"
+  if ! key_absent "$ROOT_AUTHORIZED_KEYS" "$blob" || ! as_box_user_lib key_absent "$file" "$blob"; then
+    die "the operator's key is still in an authorized_keys file, or one can't be read, so the handover is not complete"
   fi
   echo "    keys left for root:"
   key_fingerprints "$ROOT_AUTHORIZED_KEYS"

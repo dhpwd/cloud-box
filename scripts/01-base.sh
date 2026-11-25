@@ -110,6 +110,7 @@ export NVM_DIR="$HOME/.nvm"
 nvm install "$NODE_VER"
 # Only when no default is set yet, so a deliberate bump survives a re-run.
 [ "$(nvm version default)" != N/A ] || nvm alias default "$NODE_VER"
+nvm use default >/dev/null
 
 # Make nvm available to login shells that read ~/.profile as well as ~/.bashrc.
 grep -q 'NVM_DIR' ~/.profile || cat >> ~/.profile <<'PROF'
