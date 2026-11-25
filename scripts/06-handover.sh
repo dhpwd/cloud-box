@@ -15,17 +15,10 @@ require_root
 # An unconfirmed close leaves the same drop-in and an active ufw as a confirmed
 # one, until its revert reopens public SSH. Only the marker and a free lock
 # show the close was confirmed and nothing is left to undo it.
-mkdir -p "$CLOUD_BOX_RUN_DIR"
-exec 9>"$CLOSE_LOCK"
-flock -n 9 || die "a revert from '02-tailscale-lockdown.sh close' is still armed. Let it run, then run the close again and confirm it, then run this."
+take_close_lock "a revert from '02-tailscale-lockdown.sh close' is still armed. Let it run, then run the close again and confirm it, then run this."
 [ -e "$CLOSED_MARKER" ] || die "the close has not been confirmed. Run '02-tailscale-lockdown.sh close' and confirm it first."
 
-for user in root "$BOX_USER"; do
-  for kw in passwordauthentication kbdinteractiveauthentication; do
-    [ "$(sshd_setting "$user" "$kw")" = no ] ||
-      die "sshd still allows $kw for $user. The first file that sets $kw is $(sshd_first_setter "$kw")"
-  done
-done
+require_sshd_key_only root "$BOX_USER"
 [ "$(sshd_setting root permitrootlogin)" = no ] ||
   die "sshd still allows a root login. The first file that sets PermitRootLogin is $(sshd_first_setter permitrootlogin)"
 

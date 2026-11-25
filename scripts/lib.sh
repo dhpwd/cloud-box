@@ -17,12 +17,8 @@ SSHD_CONFIG_D=${SSHD_CONFIG_D:-/etc/ssh/sshd_config.d}
 ROOT_AUTHORIZED_KEYS=${ROOT_AUTHORIZED_KEYS:-/root/.ssh/authorized_keys}
 
 HANDED_OVER_MARKER="$CLOUD_BOX_STATE_DIR/handed-over"
-# shellcheck disable=SC2034 # read by the scripts that source this, like CLOSE_LOCK
+# shellcheck disable=SC2034 # read by the scripts that source this
 CLOSED_MARKER="$CLOUD_BOX_STATE_DIR/closed"
-# The lockdown's close and the handover both take this lock without waiting.
-# The revert job that close arms inherits it, so it stays held for exactly as
-# long as a revert is pending, and a reboot or a killed job releases it.
-# shellcheck disable=SC2034
 CLOSE_LOCK="$CLOUD_BOX_RUN_DIR/close.lock"
 
 INPUT_NAMES="BOX_USER OPERATOR_PUBKEY REPOS RC_REPOS RC_SPAWN RC_CAPACITY"
@@ -126,6 +122,16 @@ read_inputs() {
   [ -z "$RC_CAPACITY" ] || [[ $RC_CAPACITY =~ ^[1-9][0-9]*$ ]] || die "RC_CAPACITY=$RC_CAPACITY: use a whole number from 1, or leave it unset"
 }
 
+# The lockdown's close and the handover both take this lock without waiting,
+# on fd 9. The revert job that close arms inherits fd 9, so the lock stays held
+# for exactly as long as a revert is pending, and a reboot or a killed job
+# releases it.
+take_close_lock() {
+  mkdir -p "$CLOUD_BOX_RUN_DIR"
+  exec 9>"$CLOSE_LOCK"
+  flock -n 9 || die "$1"
+}
+
 in_list() {
   local needle=$1 item
   shift
@@ -151,6 +157,13 @@ require_box_user() {
 # agents run as that account and could point a path there at a system file.
 as_box_user() {
   runuser -u "$BOX_USER" -- "$@"
+}
+
+# Runs one of this file's functions as the box user. The script is
+# single-quoted on purpose: its $1.. are the arguments after it.
+# shellcheck disable=SC2016
+as_box_user_lib() {
+  as_box_user bash -c '. "$1" && shift && "$@"' _ "$CLOUD_BOX_LIB" "$@"
 }
 
 user_authorized_keys() {
@@ -216,9 +229,6 @@ key_fingerprints() {
   printf '%s\n' "$out" | awk '{ print "      " $2 }'
 }
 
-# The bash -c scripts below are single-quoted on purpose: their $1.. are the
-# arguments passed after them, expanded by the box user's shell.
-# shellcheck disable=SC2016
 grant_operator_key() {
   local file
   file=$(user_authorized_keys)
@@ -226,19 +236,18 @@ grant_operator_key() {
     echo "    $HANDED_OVER_MARKER exists: this box has been handed over, so the operator's key is not added again"
     return
   fi
-  as_box_user bash -c '. "$1" && add_key "$2" "$3"' _ "$CLOUD_BOX_LIB" "$file" "$OPERATOR_PUBKEY"
+  as_box_user_lib add_key "$file" "$OPERATOR_PUBKEY"
 }
 
-# shellcheck disable=SC2016
 revoke_operator_key() {
   local file
   file=$(user_authorized_keys)
   remove_key "$ROOT_AUTHORIZED_KEYS" "$OPERATOR_PUBKEY"
-  as_box_user bash -c '. "$1" && remove_key "$2" "$3"' _ "$CLOUD_BOX_LIB" "$file" "$OPERATOR_PUBKEY"
+  as_box_user_lib remove_key "$file" "$OPERATOR_PUBKEY"
   echo "    keys left for root:"
   key_fingerprints "$ROOT_AUTHORIZED_KEYS"
   echo "    keys left for $BOX_USER:"
-  as_box_user bash -c '. "$1" && key_fingerprints "$2"' _ "$CLOUD_BOX_LIB" "$file"
+  as_box_user_lib key_fingerprints "$file"
 }
 
 # sshd uses the first value it reads for each keyword. Debian's sshd_config

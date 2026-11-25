@@ -64,21 +64,18 @@ for i in "${!REPO_DIRS[@]}"; do
 
   # Frozen installs with the manager the lockfile names, so the lockfile is
   # never rewritten and a package.json that disagrees with it fails here.
-  installed=
   node_cmd=()
   if [ -f "$path/bun.lock" ] || [ -f "$path/bun.lockb" ]; then node_cmd=(bun install --frozen-lockfile)
   elif [ -f "$path/pnpm-lock.yaml" ]; then node_cmd=(pnpm install --frozen-lockfile)
   elif [ -f "$path/package-lock.json" ]; then node_cmd=(npm ci)
   fi
   if [ ${#node_cmd[@]} -gt 0 ]; then
-    installed=1
     (cd "$path" && "${node_cmd[@]}") || failed+=("$dir: ${node_cmd[*]} failed")
   fi
   if [ -f "$path/uv.lock" ]; then
-    installed=1
     (cd "$path" && uv sync --frozen) || failed+=("$dir: uv sync --frozen failed")
   fi
-  [ -n "$installed" ] || review+=("$dir")
+  [ ${#node_cmd[@]} -gt 0 ] || [ -f "$path/uv.lock" ] || review+=("$dir")
 done
 
 if [ ${#review[@]} -gt 0 ]; then

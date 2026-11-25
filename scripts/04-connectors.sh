@@ -41,6 +41,7 @@ for name in ${names[@]+"${names[@]}"}; do
     continue
   fi
 
+  replaced=
   if claude mcp get "$name" >/dev/null 2>&1; then
     if [ -z "$REPLACE" ]; then
       echo "    $name: already registered – left as it is (--replace replaces it)"
@@ -51,20 +52,18 @@ for name in ${names[@]+"${names[@]}"}; do
       attention=1
       continue
     fi
-    if ! printf '%s' "$def" | claude mcp add-json --scope user "$name" - >/dev/null 2>&1; then
-      echo "    $name: FAILED – the existing registration was removed and the new one was refused, so $name is not registered now"
-      attention=1
-      continue
-    fi
-    echo "    $name: replaced"
-  else
-    if ! printf '%s' "$def" | claude mcp add-json --scope user "$name" - >/dev/null 2>&1; then
-      echo "    $name: failed – claude mcp add-json refused the definition"
-      attention=1
-      continue
-    fi
-    echo "    $name: registered"
+    replaced=1
   fi
+  if ! printf '%s' "$def" | claude mcp add-json --scope user "$name" - >/dev/null 2>&1; then
+    if [ -n "$replaced" ]; then
+      echo "    $name: FAILED – the existing registration was removed and the new one was refused, so $name is not registered now"
+    else
+      echo "    $name: failed – claude mcp add-json refused the definition"
+    fi
+    attention=1
+    continue
+  fi
+  if [ -n "$replaced" ]; then echo "    $name: replaced"; else echo "    $name: registered"; fi
   registered+=("$name")
 
   cmd=$(printf '%s' "$def" | jq -r 'if (.type // "stdio") == "stdio" then .command // "" else "" end')

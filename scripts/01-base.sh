@@ -21,9 +21,10 @@ echo "==> Packages"
 apt-get update && apt-get upgrade -y
 # build-essential and pkg-config: native Node modules and Python source builds
 # in an owner's repos need them, and without them the failure only shows as a
-# failed install in 03-repos.sh.
+# failed install in 03-repos.sh. ufw is installed here, inactive, so the
+# lockdown's close doesn't spend its revert window waiting on apt.
 apt-get install -y git build-essential pkg-config jq ripgrep sqlite3 zip unzip \
-                   ca-certificates curl gnupg rsync sudo
+                   ca-certificates curl gnupg rsync sudo ufw
 
 echo "==> Locale"
 # SSH forwards LC_* from the client. Without the matching locale generated here,

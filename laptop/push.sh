@@ -141,12 +141,9 @@ def collect():
         else:
             dropped.append((name, "not a regular file"))
 
-    for f in TOP_FILES:
-        if os.path.lexists(os.path.join(CLAUDE, f)):
-            add(os.path.join(CLAUDE, f), f, frozenset())
-    for d in TOP_DIRS:
-        if os.path.lexists(os.path.join(CLAUDE, d)):
-            add(os.path.join(CLAUDE, d), d, frozenset())
+    for n in TOP_FILES + TOP_DIRS:
+        if os.path.lexists(os.path.join(CLAUDE, n)):
+            add(os.path.join(CLAUDE, n), n, frozenset())
     return sent, dropped
 
 
@@ -175,17 +172,19 @@ def shown(key):
 
 
 def preview():
+    check_connectors()
     sent, dropped = collect()
-    keys = []
-    for _, name in sent:
-        k = entry_key(name)
-        if k not in keys:
-            keys.append(k)
+    keys = list(dict.fromkeys(entry_key(n) for _, n in sent))
     print("Config, copied into ~/.claude on the box:")
     for k in keys:
         print("  " + shown(k))
     if not keys:
         print("  (nothing)")
+    linked = [(n, rp) for rp, n in sent if not under(rp, real(os.path.join(CLAUDE, entry_key(n))))]
+    if linked:
+        print("Reached through a symlink inside those. Check each target:")
+        for n, rp in linked:
+            print("  %s  -> %s" % (n, rp))
     if dropped:
         print("Left out:")
         for name, why in dropped:
@@ -248,7 +247,7 @@ def report():
                 text = fh.read()
         except (OSError, UnicodeDecodeError):
             continue
-        if "/Users/" in text:
+        if "/Users/" in text or HOME + "/" in text:
             users.append(name)
         base = os.path.dirname(os.path.join(CLAUDE, name))
         found, seen = [], set()
@@ -264,7 +263,7 @@ def report():
 
     print("Copied %d file(s) into ~/.claude on the box." % len(sent))
     if users:
-        print("\nMention /Users/, which the box doesn't have. Fix by hand:")
+        print("\nMention /Users/ or this laptop's home directory, which the box doesn't have. Fix by hand:")
         for n in users:
             print("  " + n)
     if outside:
@@ -295,8 +294,6 @@ def report():
 if mode == "list":
     for n in sorted(user_servers()):
         print(n)
-elif mode == "check":
-    check_connectors()
 elif mode == "preview":
     preview()
 elif mode == "connectors":
@@ -329,7 +326,6 @@ if [ -z "$CONNECTORS_SET" ]; then
   read -r CONNECTORS || CONNECTORS=
 fi
 case $CONNECTORS in none | "") CHOSEN= ;; *) CHOSEN=$CONNECTORS ;; esac
-py check "$CHOSEN"
 
 GIT_NAME=$(git config --global --includes user.name || true)
 GIT_EMAIL=$(git config --global --includes user.email || true)

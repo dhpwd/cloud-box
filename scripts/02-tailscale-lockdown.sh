@@ -52,11 +52,7 @@ MSG
 phase_close() {
   # Before anything else, so a second close can't arm a second revert while the
   # first is still counting down.
-  mkdir -p "$CLOUD_BOX_RUN_DIR"
-  exec 9>"$CLOSE_LOCK"
-  flock -n 9 || die "a revert from an earlier 'close' is still armed. Wait for it to run (public SSH is then open again), then run 'close' again."
-  rm -f "$CLOSED_MARKER"
-  rm -rf "$DECIDED"
+  take_close_lock "a revert from an earlier 'close' is still armed. Wait for it to run (public SSH is then open again), then run 'close' again."
 
   command -v tailscale >/dev/null || { echo "Tailscale not installed – run 'up' first" >&2; exit 1; }
   TS_IP=$(tailscale ip -4)
@@ -72,6 +68,8 @@ phase_close() {
   # holds the lock (fd 9) until it has run or been killed. Its sleep does not,
   # so killing the job frees the lock at once.
   REVERT_AFTER="${REVERT_AFTER:-300}"
+  rm -f "$CLOSED_MARKER"
+  rm -rf "$DECIDED"
   # shellcheck disable=SC2016 # the job's $1.. are the arguments after the script
   nohup bash -c 'sleep "$1" 9>&-
     mkdir "$2" 2>/dev/null || exit 0

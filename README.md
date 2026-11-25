@@ -76,7 +76,7 @@ To build from a particular revision, `git -C /opt/cloud-box checkout <commit>` b
 
 The checkout and `box.env` stay owned by root and not writable by the box user: root runs scripts from there later, and the agents' account must not be able to change what root runs. Every root script checks this and stops if it isn't so.
 
-`01-base.sh` installs git, the build tools, the GitHub CLI and unattended security upgrades, creates the box user and adds `OPERATOR_PUBKEY` to its `authorized_keys`, turns on lingering so the user's services survive logout, and makes public SSH key-only. It then installs, as the box user, Node (pinned, through nvm), pnpm, bun, uv, pre-commit and Claude Code (the native installer). It prints sshd's effective settings for root and the box user and stops if either still allows a password. It needs no terminal and is safe to run again.
+`01-base.sh` installs git, the build tools, the GitHub CLI, ufw (left off until the close) and unattended security upgrades, creates the box user and adds `OPERATOR_PUBKEY` to its `authorized_keys`, turns on lingering so the user's services survive logout, and makes public SSH key-only. It then installs, as the box user, Node (pinned, through nvm), pnpm, bun, uv, pre-commit and Claude Code (the native installer). It prints sshd's effective settings for root and the box user and stops if either still allows a password. It needs no terminal and is safe to run again.
 
 ### 2. Tailscale (operator, root – then the owner)
 

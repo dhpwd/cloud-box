@@ -86,6 +86,8 @@ OPKEY=$(cat "$T/keys/operator.pub")
 OTHERKEY=$(cat "$T/keys/other.pub")
 OTHER_FP=$(ssh-keygen -l -f "$T/keys/other.pub" | awk '{ print $2 }')
 OP_FP=$(ssh-keygen -l -f "$T/keys/operator.pub" | awk '{ print $2 }')
+OP_BLOB=$(awk '{ print $2 }' <<<"$OPKEY")
+OTHER_BLOB=$(awk '{ print $2 }' <<<"$OTHERKEY")
 
 # Runs a script with nothing from this shell's environment but what is listed,
 # plus any NAME=value arguments given before the script.
@@ -186,6 +188,16 @@ else
   ok "05-remote-control.sh stops when Claude is signed out, naming the owner's step"
 fi
 
+fresh_home
+mkdir -p "$T/home/Workspace/app" "$T/home/Workspace/api"
+if out=$(run STUB_LINGER=no bash "$REPO/scripts/05-remote-control.sh" 2>&1); then
+  bad "05-remote-control.sh stops when lingering is off: exited 0" "$out"
+elif [[ $out != *"lingering is off"* ]] || [ -e "$T/home/.config/systemd/user/claude-rc@.service" ]; then
+  bad "05-remote-control.sh stops when lingering is off, before writing a unit" "$out"
+else
+  ok "05-remote-control.sh stops when lingering is off, before writing a unit"
+fi
+
 # ---- 03-repos.sh --clone-only ------------------------------------------------
 
 fresh_home
@@ -231,6 +243,8 @@ JSON
   echo '{}' >"$h/.claude/settings.json"
   echo "a skill" >"$h/.claude/skills/good/SKILL.md"
   ln -s "$h/.claude.json" "$h/.claude/skills/good/leak"
+  echo "notes kept elsewhere" >"$T/elsewhere/notes.md"
+  ln -s "$T/elsewhere/notes.md" "$h/.claude/skills/good/notes"
   echo "a linked skill" >"$T/elsewhere/linked-skill/SKILL.md"
   ln -s "$T/elsewhere/linked-skill" "$h/.claude/skills/linked"
   echo "$SENTINEL" >"$h/.claude/projects/p/history.jsonl"
@@ -277,6 +291,12 @@ elif [[ $out != *"@~/somewhere/else.md"* ]]; then
   bad "push.sh names an import from outside what was sent" "$out"
 else
   ok "push.sh sends a symlinked skill, drops and names a link to ~/.claude.json, names an outside import"
+fi
+
+if [[ $out == *"skills/good/notes  -> $T/elsewhere/notes.md"* ]]; then
+  ok "push.sh previews a symlink inside a skill with its target"
+else
+  bad "push.sh previews a symlink inside a skill with its target" "$out"
 fi
 
 push_fixture
@@ -336,7 +356,7 @@ rm -rf "$T/state" "$T/run"
 printf '%s\n' "$OTHERKEY" >"$T/keys/user_ak"
 out=$(grant)
 out2=$(grant)
-if [ "$(grep -c -F "$(awk '{ print $2 }' <<<"$OPKEY")" "$T/keys/user_ak")" != 1 ]; then
+if [ "$(grep -c -F "$OP_BLOB" "$T/keys/user_ak")" != 1 ]; then
   bad "base adds the operator's key exactly once over two runs" "$out"$'\n'"$out2"$'\n'"$(cat "$T/keys/user_ak")"
 elif ! grep -qF "$OTHERKEY" "$T/keys/user_ak"; then
   bad "base leaves an unrelated key in place" "$(cat "$T/keys/user_ak")"
@@ -347,7 +367,7 @@ mkdir -p "$T/state"
 touch "$T/state/handed-over"
 printf '%s\n' "$OTHERKEY" >"$T/keys/user_ak"
 out=$(grant)
-if grep -qF "$(awk '{ print $2 }' <<<"$OPKEY")" "$T/keys/user_ak"; then
+if grep -qF "$OP_BLOB" "$T/keys/user_ak"; then
   bad "base adds no key once the box is handed over" "$out"
 else
   ok "base adds no key once the box is handed over"
@@ -365,7 +385,7 @@ handover_fixture() {
 handover_fixture
 if ! out=$(run STUB_UID=0 bash "$REPO/scripts/06-handover.sh" 2>&1); then
   bad "handover runs after a confirmed close" "$out"
-elif grep -qF "$(awk '{ print $2 }' <<<"$OPKEY")" "$T/keys/root_ak" "$T/keys/user_ak"; then
+elif grep -qF "$OP_BLOB" "$T/keys/root_ak" "$T/keys/user_ak"; then
   bad "handover removes the operator's key from both files" "$(cat "$T/keys/root_ak" "$T/keys/user_ak")"
 elif ! grep -qF "$OTHERKEY" "$T/keys/root_ak" || ! grep -qF "$OTHERKEY" "$T/keys/user_ak"; then
   bad "handover leaves an unrelated key in both files" "$(cat "$T/keys/root_ak" "$T/keys/user_ak")"
@@ -373,7 +393,7 @@ elif [[ $out != *"$OTHER_FP"* ]] || [[ $out == *"$OP_FP"* ]]; then
   bad "handover prints the remaining keys' fingerprints" "$out"
 elif [[ $out == *someone-else* || $out == *operator@test* ]]; then
   bad "handover prints no key comment" "$out"
-elif [[ $out == *"$(awk '{ print $2 }' <<<"$OTHERKEY")"* || $out == *"$(awk '{ print $2 }' <<<"$OPKEY")"* ]]; then
+elif [[ $out == *"$OTHER_BLOB"* || $out == *"$OP_BLOB"* ]]; then
   bad "handover prints no key line" "$out"
 elif [ ! -e "$T/state/handed-over" ]; then
   bad "handover leaves its marker" "$out"
@@ -382,7 +402,7 @@ else
 fi
 printf '%s\n' "$OTHERKEY" >"$T/keys/user_ak"
 grant >/dev/null
-if grep -qF "$(awk '{ print $2 }' <<<"$OPKEY")" "$T/keys/user_ak"; then
+if grep -qF "$OP_BLOB" "$T/keys/user_ak"; then
   bad "after handover, base does not grant the operator's key again"
 else
   ok "after handover, base does not grant the operator's key again"
@@ -395,12 +415,17 @@ handover_fixture
 echo "PermitRootLogin yes" >"$T/sshd/d/50-image.conf"
 expect_refusal "handover refuses while sshd allows a root login, naming the file" "$T/sshd/d/50-image.conf" \
   STUB_UID=0 STUB_SSHD_ROOT=yes bash "$REPO/scripts/06-handover.sh"
+handover_fixture
+echo "PasswordAuthentication yes" >"$T/sshd/d/50-image.conf"
+expect_refusal "handover refuses while sshd allows a password, naming the file" \
+  "allows passwordauthentication for root. The first file that sets it is $T/sshd/d/50-image.conf" \
+  STUB_UID=0 STUB_SSHD_PASSWORD=yes bash "$REPO/scripts/06-handover.sh"
 
 # ---- the lockdown's close ----------------------------------------------------
 
 lock_free() { flock -n "$T/run/close.lock" true 2>/dev/null; }
 wait_lock_free() {
-  for _ in $(seq 40); do
+  for _ in $(seq 60); do
     lock_free && return 0
     sleep 0.25
   done
@@ -413,7 +438,14 @@ close_fixture() {
 }
 
 close_fixture
-out=$({ echo yes; sleep 3; echo yes; } | run STUB_UID=0 REVERT_AFTER=1 bash "$REPO/scripts/02-tailscale-lockdown.sh" close 2>&1) && rc=0 || rc=$?
+# The second yes goes in only once the revert has run, which its ufw call shows.
+revert_ran() {
+  for _ in $(seq 40); do
+    grep -q '^ufw --force disable' "$LOG" && return 0
+    sleep 0.25
+  done
+}
+out=$({ echo yes; revert_ran; echo yes; } | run STUB_UID=0 REVERT_AFTER=1 bash "$REPO/scripts/02-tailscale-lockdown.sh" close 2>&1) && rc=0 || rc=$?
 wait_lock_free || true
 if [ "$rc" -eq 0 ]; then
   bad "a yes after the revert has fired exits non-zero" "$out"
@@ -428,9 +460,9 @@ else
 fi
 
 close_fixture
-out=$({ echo yes; echo no; } | run STUB_UID=0 REVERT_AFTER=4 bash "$REPO/scripts/02-tailscale-lockdown.sh" close 2>&1) || true
+out=$({ echo yes; echo no; } | run STUB_UID=0 REVERT_AFTER=8 bash "$REPO/scripts/02-tailscale-lockdown.sh" close 2>&1) || true
 # Two yeses, so a close that wrongly went ahead would confirm and exit 0.
-if out2=$(printf 'yes\nyes\n' | run STUB_UID=0 REVERT_AFTER=4 bash "$REPO/scripts/02-tailscale-lockdown.sh" close 2>&1); then
+if out2=$(printf 'yes\nyes\n' | run STUB_UID=0 REVERT_AFTER=8 bash "$REPO/scripts/02-tailscale-lockdown.sh" close 2>&1); then
   bad "a second close while a revert is armed refuses" "$out2"
 elif [[ $out2 != *"still armed"* ]]; then
   bad "a second close while a revert is armed says why" "$out2"
@@ -445,7 +477,7 @@ wait_lock_free || bad "the armed revert released its lock after running"
 close_fixture
 printf '%s\n%s\n' "$OPKEY" "$OTHERKEY" >"$T/keys/root_ak"
 printf '%s\n%s\n' "$OPKEY" "$OTHERKEY" >"$T/keys/user_ak"
-out=$({ echo yes; echo yes; } | run STUB_UID=0 REVERT_AFTER=6 bash "$REPO/scripts/02-tailscale-lockdown.sh" close 2>&1) && rc=0 || rc=$?
+out=$({ echo yes; echo yes; } | run STUB_UID=0 REVERT_AFTER=20 bash "$REPO/scripts/02-tailscale-lockdown.sh" close 2>&1) && rc=0 || rc=$?
 if [ "$rc" -ne 0 ] || [ ! -e "$T/state/closed" ]; then
   bad "a timely yes confirms the close and writes the marker" "$out"
 elif ! out2=$(run STUB_UID=0 bash "$REPO/scripts/06-handover.sh" 2>&1); then
@@ -453,8 +485,8 @@ elif ! out2=$(run STUB_UID=0 bash "$REPO/scripts/06-handover.sh" 2>&1); then
 else
   ok "a timely yes writes the marker, and a handover straight after is not refused"
 fi
-sleep 7
-if [ ! -e "$T/sshd/d/99-tailscale.conf" ] || grep -q '^ufw --force disable' "$LOG"; then
+# The lock is free only once the revert job is gone, and only that job can revert.
+if ! lock_free || [ ! -e "$T/sshd/d/99-tailscale.conf" ] || grep -q '^ufw --force disable' "$LOG"; then
   bad "a confirmed close is not reverted later" "$(cat "$LOG")"
 else
   ok "a confirmed close is not reverted later"

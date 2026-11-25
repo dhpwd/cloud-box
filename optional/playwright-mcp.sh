@@ -110,10 +110,7 @@ for _ in $(seq 20); do
   [[ -S /tmp/.X11-unix/X98 ]] && break
   sleep 0.5
 done
-[[ -S /tmp/.X11-unix/X98 ]] || {
-  echo "xvfb-playwright.service did not bring up :98 – see journalctl --user -u xvfb-playwright" >&2
-  exit 1
-}
+[[ -S /tmp/.X11-unix/X98 ]] || die "xvfb-playwright.service did not bring up :98 – see journalctl --user -u xvfb-playwright"
 
 echo "==> Registering the servers at user scope"
 claude mcp remove playwright -s user 2>/dev/null || true

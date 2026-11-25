@@ -69,42 +69,43 @@ UNIT
 } >"$units/claude-rc@.service"
 systemctl --user daemon-reload
 
-touched=()
+started=
 for i in "${!RC_DIRS[@]}"; do
   r=${RC_DIRS[$i]}
   agent=${RC_AGENTS[$i]}
   unit="claude-rc@$r.service"
 
   f="$conf/$r.json"
-  before=$(cat "$f" 2>/dev/null || true)
   if [ -n "$agent" ]; then
     printf '{ "agent": "%s" }\n' "$agent" >"$f"
   else
     rm -f "$f"
   fi
-  after=$(cat "$f" 2>/dev/null || true)
 
   # The server reads its arguments and settings file once, at start, and a
   # daemon-reload doesn't reach a running process, so a changed setting means a
-  # restart. The arguments are compared on the running process itself.
+  # restart. The arguments are compared on the running process itself. The
+  # agent it was started with is recorded once it has started, so a run that
+  # stopped between writing the settings file and the restart still restarts.
   want="claude remote-control $flags --name $r"
   [ -z "$agent" ] || want+=" --settings $f"
+  stamp="$conf/$r.started-agent"
+  systemctl --user enable --quiet "$unit"
   if systemctl --user is-active --quiet "$unit"; then
     pid=$(systemctl --user show -p MainPID --value "$unit")
     have=$(ps -o args= -p "$pid" 2>/dev/null || true)
-    if [ "$have" = "$want" ] && [ "$before" = "$after" ]; then
+    if [ "$have" = "$want" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$agent" ]; then
       echo "==> $r: running, unchanged"
-      systemctl --user enable --quiet "$unit"
       continue
     fi
     echo "==> $r: settings changed – restarting its server. Its open sessions stop until each is next opened in the app, and a turn running now is lost"
-    systemctl --user enable --quiet "$unit"
     systemctl --user restart "$unit"
   else
     echo "==> $r: starting"
-    systemctl --user enable --now --quiet "$unit"
+    systemctl --user start "$unit"
   fi
-  touched+=("$r")
+  printf '%s\n' "$agent" >"$stamp"
+  started=1
 done
 
 while read -r u _; do
@@ -114,7 +115,7 @@ while read -r u _; do
     echo "    note: claude-rc@$r is running but not in RC_REPOS. To stop it: systemctl --user disable --now claude-rc@$r"
 done < <(systemctl --user list-units 'claude-rc@*' --plain --no-legend --state=active 2>/dev/null)
 
-if [ ${#touched[@]} -gt 0 ]; then
+if [ -n "$started" ]; then
   echo "==> Waiting 20s, then checking the servers stayed up"
   sleep 20
 fi
