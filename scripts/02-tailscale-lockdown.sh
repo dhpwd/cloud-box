@@ -69,26 +69,15 @@ phase_close() {
   # the script reaches the end and cancels it. A wrong rule then locks you out
   # for five minutes instead of until you can reach the web console.
   #
-  # The revert is always the last to change anything. When it fires, it stops
-  # this script and whatever this script is running, then undoes the close, so
-  # a step that stalled past the deadline can't land after the undo. It runs in
-  # a session of its own, so stopping this script doesn't stop it. It holds the
-  # lock (fd 9) until it has run or been killed. Its first sleep doesn't hold
-  # the lock, so killing the job frees the lock at once.
+  # The revert is always the last to change anything: when it fires it stops
+  # this script and everything it started, then undoes the close, and reports
+  # the result here (revert_close in lib.sh).
   REVERT_AFTER="${REVERT_AFTER:-300}"
   rm -f "$CLOSED_MARKER"
   # shellcheck disable=SC2016 # the job's $1.. are the arguments after the script
-  nohup setsid bash -c 'sleep "$1" 9>&-
-    mkdir "$2" 2>/dev/null || exit 0
-    for c in $(pgrep -P "$5"); do [ "$c" = "$$" ] || kill -TERM "$c" 2>/dev/null; done
-    kill -TERM "$5" 2>/dev/null
-    for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$5" 2>/dev/null || break; sleep 0.5; done
-    kill -KILL "$5" 2>/dev/null
-    rm -f "$3" "$4"
-    systemctl restart ssh
-    ufw --force disable' _ "$REVERT_AFTER" "$DECIDED" "$DROPIN" "$CLOSED_MARKER" "$$" >/dev/null 2>&1 &
+  nohup setsid bash -c '. "$1"; shift; revert_close "$@"' _ "$CLOUD_BOX_LIB" \
+    "$REVERT_AFTER" "$DECIDED" "$DROPIN" "$CLOSED_MARKER" "$$" >/dev/null 2>&1 &
   REVERT_PID=$!
-  trap 'echo "!! ${REVERT_AFTER}s ran out, so the revert stopped the close and reopened public SSH. Public SSH is open again. Run close again." >&2; exit 1' TERM
   echo "==> Auto-revert armed for ${REVERT_AFTER}s (pid $REVERT_PID)"
 
   echo "==> Binding sshd to $TS_IP only"
@@ -122,12 +111,11 @@ CONF
     exit 1
   fi
   if ! mkdir "$DECIDED" 2>/dev/null; then
-    echo "!! Too late: ${REVERT_AFTER}s ran out before that answer, and the revert has" >&2
-    echo "!! already reopened public SSH and turned ufw off. Public SSH is open again." >&2
+    echo "!! Too late: ${REVERT_AFTER}s ran out before that answer, and the revert is" >&2
+    echo "!! undoing the close. Public SSH is open again once it reports." >&2
     echo "!! Run 'close' again." >&2
     exit 1
   fi
-  trap - TERM
   kill "$REVERT_PID" 2>/dev/null || true
   wait "$REVERT_PID" 2>/dev/null || true
   mkdir -p "$CLOUD_BOX_STATE_DIR"

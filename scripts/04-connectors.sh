@@ -48,9 +48,10 @@ for name in ${names[@]+"${names[@]}"}; do
 
   # jq's error messages quote the value they failed on, so they go nowhere.
   if ! printf '%s' "$def" | jq -e 'type == "object"
-      and ((.args // []) | type == "array" and all(type == "string"))
-      and ((.env // {}) | type == "object" and all(.[]; type == "string"))
-      and ((.headers // {}) | type == "object" and all(.[]; type == "string"))
+      and (if has("type") then (.type | IN("stdio", "http", "sse", "ws")) else true end)
+      and (if has("args") then (.args | type == "array" and all(type == "string")) else true end)
+      and (if has("env") then (.env | type == "object" and all(.[]; type == "string")) else true end)
+      and (if has("headers") then (.headers | type == "object" and all(.[]; type == "string")) else true end)
       and (if (.type // "stdio") == "stdio" then (.command | type == "string") else (.url | type == "string") end)' \
       >/dev/null 2>&1; then
     echo "    $name: skipped – the definition is not in the form ~/.claude.json uses"

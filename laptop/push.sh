@@ -70,7 +70,7 @@ command -v git >/dev/null || die "git is missing on this laptop"
 python3 -c '' >/dev/null 2>&1 || die "python3 is missing on this laptop. On a Mac: xcode-select --install"
 
 read -r -d '' PY <<'PYEOF' || true
-import json, os, re, stat, sys, tarfile
+import json, os, re, shutil, stat, sys, tarfile
 
 mode = sys.argv[1]
 chosen = [n.strip() for n in sys.argv[2].split(",") if n.strip()]
@@ -83,6 +83,7 @@ TOP_DIRS = ["skills", "agents", "commands", "rules", "output-styles", "hooks"]
 SKIP = {".DS_Store", ".git", "node_modules", "__pycache__"}
 HISTORY = re.compile(r"^(history\.jsonl|\.?[A-Za-z0-9_]*history|.+\.history)$", re.I)
 MANIFEST = os.environ.get("PUSH_MANIFEST", "")
+STAGE = os.environ.get("PUSH_STAGE", "")
 
 
 def real(p):
@@ -216,18 +217,46 @@ def shown(key):
     return key + ("  -> " + rp if rp != os.path.abspath(lp) else "")
 
 
+# Copies each file to be sent into the private stage directory, so what is
+# sent is the bytes the preview listed, whatever happens to the originals while
+# the prompt waits. The file is checked again as opened: still the one
+# collect() found, still a regular file with a single hard link.
+def stage(sent):
+    staged, dropped = [], []
+    for rp, name, dev, ino in sent:
+        try:
+            fd = os.open(rp, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except OSError:
+            dropped.append((name, "could not be read"))
+            continue
+        with os.fdopen(fd, "rb") as src:
+            st = os.fstat(src.fileno())
+            if not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != (dev, ino) or st.st_nlink > 1:
+                dropped.append((name, "changed while it was being read"))
+                continue
+            dest = os.path.join(STAGE, name)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with open(dest, "wb") as out:
+                shutil.copyfileobj(src, out)
+            os.chmod(dest, stat.S_IMODE(st.st_mode))
+        staged.append((rp, name))
+    return staged, dropped
+
+
 def preview():
     check_connectors()
     sent, dropped = collect()
+    sent, more = stage(sent)
+    dropped += more
     with open(MANIFEST, "w") as fh:
-        json.dump(sent, fh)
-    keys = list(dict.fromkeys(entry_key(e[1]) for e in sent))
+        json.dump([n for _, n in sent], fh)
+    keys = list(dict.fromkeys(entry_key(n) for _, n in sent))
     print("Config, copied into ~/.claude on the box:")
     for k in keys:
         print("  " + shown(k))
     if not keys:
         print("  (nothing)")
-    linked = [(e[1], e[0]) for e in sent if not under(e[0], real(os.path.join(CLAUDE, entry_key(e[1]))))]
+    linked = [(n, rp) for rp, n in sent if not under(rp, real(os.path.join(CLAUDE, entry_key(n))))]
     if linked:
         print("Reached through a symlink inside those. Check each target:")
         for n, rp in linked:
@@ -259,25 +288,13 @@ def strip_owner(info):
 
 def approved():
     with open(MANIFEST) as fh:
-        return [tuple(e) for e in json.load(fh)]
+        return json.load(fh)
 
 
-# Each file is sent only if it is still the one the preview showed: the same
-# device and inode before anything is written, and again on the file as opened.
 def archive():
-    files = approved()
-    for rp, name, dev, ino in files:
-        st = os.lstat(rp) if os.path.lexists(rp) else None
-        if st is None or not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != (dev, ino):
-            sys.exit("!! %s changed after the preview, so nothing was sent. Run this again" % name)
     with tarfile.open(fileobj=sys.stdout.buffer, mode="w|") as tf:
-        for rp, name, dev, ino in files:
-            fd = os.open(rp, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-            with os.fdopen(fd, "rb") as fh:
-                st = os.fstat(fh.fileno())
-                if (st.st_dev, st.st_ino) != (dev, ino):
-                    sys.exit("!! %s changed while it was being sent. Run this again" % name)
-                tf.addfile(strip_owner(tf.gettarinfo(arcname=name, fileobj=fh)), fh)
+        for name in approved():
+            tf.add(os.path.join(STAGE, name), arcname=name, recursive=False, filter=strip_owner)
 
 
 IMPORT = re.compile(r"(?<![\w.@])@((?:~|\$HOME|\$\{HOME\}|\.{1,2})?/[^\s'\"`)\]>,;]+|[^\s'\"`)\]>,;@]+\.md)")
@@ -301,10 +318,10 @@ def expand(p, base):
 
 
 def report():
-    sent = approved()
-    names = [e[1] for e in sent]
+    names = approved()
     users, outside = [], []
-    for rp, name, _, _ in sent:
+    for name in names:
+        rp = os.path.join(STAGE, name)
         try:
             with open(rp, encoding="utf-8") as fh:
                 text = fh.read()
@@ -336,7 +353,7 @@ def report():
         for n, found in outside:
             more = " (+%d more)" % (len(found) - 5) if len(found) > 5 else ""
             print("  %s: %s%s" % (n, ", ".join(found[:5]), more))
-    settings = next((e[0] for e in sent if e[1] == "settings.json"), None)
+    settings = os.path.join(STAGE, "settings.json") if "settings.json" in names else None
     if settings:
         try:
             with open(settings) as fh:
@@ -374,7 +391,7 @@ PYEOF
 
 WORK=$(mktemp -d) || die "could not make a temporary directory"
 trap 'rm -rf "$WORK"' EXIT
-export PUSH_MANIFEST="$WORK/manifest.json"
+export PUSH_MANIFEST="$WORK/manifest.json" PUSH_STAGE="$WORK/stage"
 
 py() {
   python3 -I -c "$PY" "$@" ${EXCLUDES[@]+"${EXCLUDES[@]}"}
@@ -421,11 +438,9 @@ echo "    link: open it in a browser, approve, and the copy carries on."
 
 failed=0
 echo "==> Config"
-config_copied=1
 if ! py archive "$CHOSEN" | remote 'mkdir -p ~/.claude && tar -x -f - -C ~/.claude --no-same-owner'; then
-  echo "!! copying the config failed" >&2
-  failed=1
-  config_copied=
+  echo "!! Copying the config failed, so nothing else was sent. Fix the error above and run this again." >&2
+  exit 1
 fi
 
 # Runs with no connector chosen too, so the status of claude.ai connectors and
@@ -448,9 +463,5 @@ else
 fi
 
 echo
-if [ -n "$config_copied" ]; then
-  py report "$CHOSEN"
-else
-  echo "!! The config did not reach the box. Fix the error above and run this again."
-fi
+py report "$CHOSEN"
 exit "$failed"

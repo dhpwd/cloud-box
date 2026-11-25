@@ -133,6 +133,57 @@ take_close_lock() {
   flock -n 9 || die "$1"
 }
 
+# Every process the close started, at any depth, except this job and what
+# it runs.
+close_tree() {
+  local c
+  for c in $(pgrep -P "$1"); do
+    [ "$c" = "$$" ] && continue
+    echo "$c"
+    close_tree "$c"
+  done
+}
+
+# The close's dead-man switch, started in the background by
+# 02-tailscale-lockdown.sh close, in a session of its own. Unless the close
+# confirms first, it stops the close and everything the close started, then
+# undoes the close, so it is always the last to change anything. It holds the
+# close lock (fd 9) until it returns. Its first sleep doesn't, so killing it
+# frees the lock at once.
+revert_close() {
+  local after=$1 decided=$2 dropin=$3 marker=$4 close=$5 ppid pids p failed=
+  sleep "$after" 9>&-
+  mkdir "$decided" 2>/dev/null || return 0
+  exec 3>/dev/null
+  # This job's parent is the close for as long as the close runs, so a process
+  # that has since taken the close's PID is never signalled.
+  read -r _ _ _ ppid _ <"/proc/$$/stat"
+  if [ "$ppid" = "$close" ]; then
+    exec 3>>"/proc/$close/fd/2" || exec 3>/dev/null
+    echo "!! ${after}s ran out, so the close is being stopped and undone" >&3
+    # Stopped first, so nothing in the tree can start another process before
+    # the kill.
+    kill -STOP "$close" 2>/dev/null
+    pids=$(close_tree "$close")
+    for p in $pids; do kill -STOP "$p" 2>/dev/null; done
+    pids="$pids $(close_tree "$close")"
+    for p in $pids "$close"; do kill -KILL "$p" 2>/dev/null; done
+    for _ in $(seq 50); do
+      read -r _ _ _ ppid _ <"/proc/$$/stat"
+      [ "$ppid" = "$close" ] || break
+      sleep 0.1
+    done
+  fi
+  rm -f "$dropin" "$marker" || failed="removing $dropin"
+  systemctl restart ssh || failed="${failed:+$failed, }restarting sshd"
+  ufw --force disable >/dev/null || failed="${failed:+$failed, }turning ufw off"
+  if [ -z "$failed" ]; then
+    echo "!! The revert has run. Public SSH is open again. Run 'close' again." >&3
+  else
+    echo "!! The revert did not finish ($failed). Check sshd and ufw from the provider's console." >&3
+  fi
+}
+
 # The owner's laptop takes push.sh from GitHub at the commit this checkout is
 # at, never through a session on the box: the box user's login files decide
 # what a session as that user serves. Printed by root steps, which the agents
@@ -140,21 +191,22 @@ take_close_lock() {
 # shell to run.
 # shellcheck disable=SC2016
 print_push_line() {
-  local commit origin repo
+  local commit origin repo box_repo=
   commit=$(git -C "$CLOUD_BOX_DIR" rev-parse HEAD)
   origin=$(git -C "$CLOUD_BOX_DIR" remote get-url origin 2>/dev/null || true)
   repo=${origin#https://github.com/}
   repo=${repo#git@github.com:}
   repo=${repo%.git}
   if ! [[ $repo =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
-    echo "    !! origin ($origin) is not a GitHub repo, so there is no URL for the laptop. Push this commit to GitHub first"
+    echo "    !! this checkout's origin isn't a github.com URL this can read, so there is no URL for the laptop. Push this commit to GitHub first"
     return 0
   fi
   [ -z "$(git -C "$CLOUD_BOX_DIR" status --porcelain --untracked-files=no)" ] ||
     echo "    !! this checkout has local changes, so the laptop's copy of push.sh may not match what the box runs"
+  [ "$CLOUD_BOX_DIR" = /opt/cloud-box ] || box_repo="BOX_REPO=$(printf '%q' "$CLOUD_BOX_DIR") "
   echo "    This checkout is at $commit. On the owner's laptop, step 5 of the README runs:"
-  printf '      ( d=$(mktemp -d) || exit 1; trap %s EXIT; curl -fsSL -o "$d/push.sh" https://raw.githubusercontent.com/%s/%s/laptop/push.sh && /bin/bash "$d/push.sh" %s@<box name> --connectors <name,name> )\n' \
-    "'rm -rf \"\$d\"'" "$repo" "$commit" "$BOX_USER"
+  printf '      ( d=$(mktemp -d) || exit 1; trap %s EXIT; curl -fsSL -o "$d/push.sh" https://raw.githubusercontent.com/%s/%s/laptop/push.sh && %s/bin/bash "$d/push.sh" %s@<box name> --connectors <name,name> )\n' \
+    "'rm -rf \"\$d\"'" "$repo" "$commit" "$box_repo" "$BOX_USER"
 }
 
 in_list() {
@@ -209,9 +261,10 @@ key_blob() {
 }
 
 # Marks (hit) an active authorized_keys line whose key is k. A line is
-# [options] keytype base64 [comment]: the options field, which may hold quoted
-# spaces, is skipped, and nothing after the key counts, so neither a comment
-# nor a commented-out line can match.
+# [options] keytype base64 [comment]: the options field is skipped the way
+# OpenSSH skips it (quotes may hold spaces, and a backslash escapes only a
+# quote), and nothing after the key counts, so neither a comment nor a
+# commented-out line can match.
 # shellcheck disable=SC2016
 KEY_LINE='
 { hit = 0 }
@@ -222,7 +275,7 @@ KEY_LINE='
     q = 0
     for (i = 1; i <= length(line); i++) {
       c = substr(line, i, 1)
-      if (c == "\\") i++
+      if (c == "\\" && substr(line, i + 1, 1) == "\"") i++
       else if (c == "\"") q = !q
       else if (!q && (c == " " || c == "\t")) break
     }
@@ -237,6 +290,10 @@ KEY_LINE='
 # for one without the key.
 key_file_state() {
   local d
+  if [ -L "$1" ] && [ ! -e "$1" ]; then
+    echo unreadable
+    return
+  fi
   if [ -e "$1" ]; then
     if [ -r "$1" ]; then echo present; else echo unreadable; fi
     return
@@ -249,9 +306,14 @@ key_file_state() {
 # Succeeds only when the file provably doesn't exist, or is readable and holds
 # no active copy of the key.
 key_absent() {
+  local rc=0
   case $(key_file_state "$1") in
     absent) return 0 ;;
-    present) ! file_has_key "$1" "$2" ;;
+    present)
+      # awk exits 1 when the key isn't there and 2 when it can't read the file.
+      file_has_key "$1" "$2" || rc=$?
+      [ "$rc" -eq 1 ]
+      ;;
     *) return 1 ;;
   esac
 }

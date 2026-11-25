@@ -41,7 +41,9 @@ stub() {
 }
 
 for c in apt apt-get bun pnpm npm pre-commit journalctl scp; do stub "$c"; done
-stub ufw 'case "$1 $2" in "--force reset") [ -z "${STUB_UFW_SLOW:-}" ] || sleep 3 ;; esac'
+stub ufw 'case "$1 $2" in "--force reset")
+  if [ -n "${STUB_UFW_SLOW:-}" ]; then (sleep 3; echo "ufw helper wrote rules late" >>"$STUB_LOG") & wait; fi ;;
+esac'
 for c in sudo dpkg adduser useradd usermod gpasswd passwd locale-gen update-locale getent; do
   stub "$c" 'echo "stub: $0 must not run in tests" >&2; exit 1'
 done
@@ -66,7 +68,12 @@ stub systemctl 'case $* in *is-active*) [ "${STUB_ACTIVE:-no}" = yes ] ;; *show*
 stub ps 'case " $* " in *" -ww "*) printf "%s\n" "${STUB_PS_ARGS:-}" ;; *) printf "%s\n" "${STUB_PS_ARGS:0:40}" ;; esac'
 # Real git for everything but pull, which would reach a network or, from an
 # empty .git, a repository above the temporary directory.
-stub git 'for a; do [ "$a" != pull ] || exit "${STUB_GIT_PULL:-0}"; done; exec /usr/bin/git "$@"'
+stub git 'case " $* " in
+  *" pull "*) exit "${STUB_GIT_PULL:-0}" ;;
+  *" remote get-url origin "*) echo "${STUB_ORIGIN:-https://github.com/example-org/cloud-box.git}"; exit 0 ;;
+  *" status --porcelain "*) exit 0 ;;
+esac
+exec /usr/bin/git "$@"'
 stub tailscale 'case $1 in ip) echo 100.64.0.1 ;; status) echo "{\"Self\":{\"DNSName\":\"box.example.ts.net.\"}}" ;; esac'
 stub sshd 'case $1 in -T) printf "passwordauthentication %s\nkbdinteractiveauthentication no\npermitrootlogin %s\nlistenaddress 100.64.0.1:22\nallowusers agent\n" "${STUB_SSHD_PASSWORD:-no}" "${STUB_SSHD_ROOT:-no}" ;; esac'
 stub gh 'case "$1 $2" in
@@ -400,13 +407,14 @@ fi
 
 push_fixture
 out=$(printf 'yes\n' | run STUB_SSH_FAIL=tar bash "$REPO/laptop/push.sh" agent@box --connectors none 2>&1) || true
-if [[ $out != *"copying the config failed"* ]] || [[ $out == *"Copied into"* ]]; then
-  bad "push.sh reports a failed copy as failed" "$out"
+if [[ $out != *"Copying the config failed"* ]] || [[ $out == *"Copied into"* ]] || [ -n "$(ssh_call_with 04-connectors.sh)" ]; then
+  bad "push.sh reports a failed copy as failed and sends nothing more" "$out"
 else
-  ok "push.sh reports a failed copy as failed"
+  ok "push.sh reports a failed copy as failed and sends nothing more"
 fi
 
-# A file replaced while the confirmation prompt is open is not the one previewed.
+# A file replaced while the confirmation prompt is open is not the one previewed:
+# what is sent is what the preview read.
 push_fixture
 mkfifo "$T/answer"
 run bash "$REPO/laptop/push.sh" agent@box --connectors none <"$T/answer" >"$T/push.out" 2>&1 &
@@ -422,10 +430,13 @@ echo yes >&7
 exec 7>&-
 wait "$push_pid" || true
 rm -f "$T/answer"
-if ! grep -q 'skills/good/SKILL.md changed after the preview' "$T/push.out" || grep -q 'Copied into' "$T/push.out"; then
-  bad "push.sh stops when a file changed after the preview" "$(cat "$T/push.out")"
+c=$(ssh_call_with tar)
+sent_skill=
+[ -z "$c" ] || sent_skill=$(tar -xOf "$T/ssh/$c.in" skills/good/SKILL.md 2>/dev/null || true)
+if [ "$sent_skill" != "a skill" ]; then
+  bad "push.sh sends the bytes the preview read, not a file swapped in after it" "$(cat "$T/push.out")"$'\n'"sent: $sent_skill"
 else
-  ok "push.sh stops when a file changed after the preview"
+  ok "push.sh sends the bytes the preview read, not a file swapped in after it"
 fi
 
 # A skill added while the confirmation prompt is open was never previewed.
@@ -526,10 +537,11 @@ else
 fi
 
 fresh_home
-out=$(printf '{"bad": {"command": "x", "args": "SECRETARGS777"}, "bad2": {"command": "x", "args": [{"k": "SECRETARGS888"}]}}' |
+out=$(printf '{"bad": {"command": "x", "args": "SECRETARGS777"}, "bad2": {"command": "x", "args": [{"k": "SECRETARGS888"}]}, "bad3": {"type": "bogus", "url": "https://x.example"}, "bad4": {"command": "x", "args": false}}' |
   run bash "$REPO/scripts/04-connectors.sh" 2>&1) || true
 if [[ $out == *SECRETARGS* ]] || [[ $out != *"bad: skipped – the definition is not in the form"* ]] ||
-  [[ $out != *"bad2: skipped – the definition is not in the form"* ]] || [ -e "$T/claude-registry/bad" ] || [ -e "$T/claude-registry/bad2" ]; then
+  [[ $out != *"bad2: skipped – the definition is not in the form"* ]] || [[ $out != *"bad3: skipped – the definition is not in the form"* ]] ||
+  [[ $out != *"bad4: skipped – the definition is not in the form"* ]] || [ -n "$(ls "$T/claude-registry" 2>/dev/null)" ]; then
   bad "04-connectors.sh skips a malformed definition without printing it" "$out"
 else
   ok "04-connectors.sh skips a malformed definition without printing it"
@@ -610,10 +622,18 @@ elif [ ! -e "$T/state/handed-over" ]; then
 else
   ok "handover removes the operator's key from both files, keeps the other, prints fingerprints only"
 fi
-if [[ $out == *"/$HEAD_SHA/laptop/push.sh && /bin/bash \"\$d/push.sh\" agent@<box name>"* && $out == *'curl -fsSL -o "$d/push.sh"'* ]]; then
-  ok "handover prints the laptop's push.sh line at the checkout's commit"
+if [[ $out == *"raw.githubusercontent.com/example-org/cloud-box/$HEAD_SHA/laptop/push.sh && BOX_REPO="*'/bin/bash "$d/push.sh" agent@<box name>'* &&
+  $out == *'curl -fsSL -o "$d/push.sh"'* ]]; then
+  ok "handover prints the laptop's push.sh line at the checkout's commit, with the checkout's path"
 else
-  bad "handover prints the laptop's push.sh line at the checkout's commit" "$out"
+  bad "handover prints the laptop's push.sh line at the checkout's commit, with the checkout's path" "$out"
+fi
+handover_fixture
+out=$(run STUB_UID=0 STUB_ORIGIN="https://someone:SECRETTOKEN999@github.com/example-org/cloud-box.git" bash "$REPO/scripts/06-handover.sh" 2>&1) || true
+if [[ $out == *SECRETTOKEN999* ]] || [[ $out != *"isn't a github.com URL this can read"* ]]; then
+  bad "handover never prints an origin URL" "$out"
+else
+  ok "handover never prints an origin URL"
 fi
 printf '%s\n' "$OTHERKEY" >"$T/keys/user_ak"
 grant >/dev/null
@@ -645,6 +665,28 @@ else
   ok "handover stops when the box user's key file can't be read"
 fi
 chmod 700 "$T/userkeys"
+# OpenSSH ends this options field at the second quote, so the line's key is
+# OTHERKEY: a parser that treats every backslash as an escape reads OPKEY.
+handover_fixture
+printf '%s\n' "command=\"a\\\\\" ssh-ed25519 $OP_BLOB op\" ssh-ed25519 $OTHER_BLOB c" >"$T/keys/user_ak"
+out=$(run STUB_UID=0 bash "$REPO/scripts/06-handover.sh" 2>&1) || true
+if ! grep -qF "ssh-ed25519 $OTHER_BLOB c" "$T/keys/user_ak"; then
+  bad "handover reads an options field the way OpenSSH does" "$out"$'\n'"$(cat "$T/keys/user_ak")"
+else
+  ok "handover reads an options field the way OpenSSH does"
+fi
+handover_fixture
+mkdir -p "$T/locked"
+printf '%s\n' "$OPKEY" >"$T/locked/ak"
+chmod 000 "$T/locked"
+ln -sfn "$T/locked/ak" "$T/keys/linked_ak"
+if out=$(run STUB_UID=0 USER_AUTHORIZED_KEYS="$T/keys/linked_ak" bash "$REPO/scripts/06-handover.sh" 2>&1); then
+  bad "handover stops when the box user's key file is a link it can't follow: exited 0" "$out"
+else
+  ok "handover stops when the box user's key file is a link it can't follow"
+fi
+chmod 700 "$T/locked"
+rm -f "$T/keys/linked_ak"
 handover_fixture
 printf '%s ssh-ed25519 %s\n' "$OTHERKEY" "$OP_BLOB" >"$T/keys/user_ak"
 out=$(run STUB_UID=0 bash "$REPO/scripts/06-handover.sh" 2>&1) || true
@@ -739,6 +781,7 @@ close_pid=$!
 exec 7>"$T/close-answers"
 echo yes >&7
 revert_ran
+wait_lock_free || true
 out2=$(echo no | run STUB_UID=0 bash "$REPO/scripts/02-tailscale-lockdown.sh" close 2>&1) || true
 exec 7>&-
 wait "$close_pid" || true
