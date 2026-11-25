@@ -623,8 +623,9 @@ elif [ ! -e "$T/state/handed-over" ]; then
 else
   ok "handover removes the operator's key from both files, keeps the other, prints fingerprints only"
 fi
-q=$(printf '%q' "$REPO")
-if [[ $out == *"raw.githubusercontent.com/example-org/cloud-box/$HEAD_SHA/laptop/push.sh && BOX_REPO=$q /bin/bash \"\$d/push.sh\" agent@<box name>"* &&
+box_repo="BOX_REPO=$(printf '%q' "$REPO") "
+[ "$REPO" != /opt/cloud-box ] || box_repo=
+if [[ $out == *"raw.githubusercontent.com/example-org/cloud-box/$HEAD_SHA/laptop/push.sh && $box_repo/bin/bash \"\$d/push.sh\" agent@<box name>"* &&
   $out == *'curl -fsSL -o "$d/push.sh"'* ]]; then
   ok "handover prints the laptop's push.sh line at the checkout's commit, with the checkout's path"
 else
@@ -818,14 +819,23 @@ for mode in full unread; do
   # shellcheck disable=SC2217 # sleep is meant not to read
   sleep 30 <"$T/errpipe" &
   holder=$!
-  { echo yes; sleep 4; } | run STUB_UID=0 STUB_UFW_SLOW=1 REVERT_AFTER=1 bash "$REPO/scripts/02-tailscale-lockdown.sh" close >"$T/close.out" 2>"$T/errpipe" &
+  { echo yes; sleep 4; } | run STUB_UID=0 STUB_UFW_SLOW=1 REVERT_AFTER=1 bash "$REPO/scripts/02-tailscale-lockdown.sh" close >"$T/close-$mode.out" 2>"$T/errpipe" &
   close_pid=$!
   for _ in $(seq 40); do
-    grep -q 'Auto-revert armed' "$T/close.out" 2>/dev/null && break
+    grep -q 'Auto-revert armed' "$T/close-$mode.out" 2>/dev/null && break
     sleep 0.1
   done
   if [ "$mode" = full ]; then
-    timeout 1 head -c 65536 /dev/zero >"$T/errpipe" || true
+    # Written without blocking until the pipe refuses even one byte, whatever
+    # its capacity.
+    python3 -c 'import os, sys
+fd = os.open(sys.argv[1], os.O_WRONLY | os.O_NONBLOCK)
+for n in (4096, 1):
+    try:
+        while True:
+            os.write(fd, b"x" * n)
+    except BlockingIOError:
+        pass' "$T/errpipe"
   else
     kill "$holder" 2>/dev/null || true
   fi
