@@ -138,7 +138,7 @@ Arguments after `<box user>@<box name>`:
 - `--replace` – replace a connector already registered on the box under the same name. Without it, an existing one is left as it is
 - `--exclude <path under ~/.claude>` – leave out a file or folder, such as `skills/client-work` or `~/.claude/skills/client-work`. Repeat it for more. A path that names nothing under `~/.claude` stops the run before anything is sent
 
-It copies from the laptop's `~/.claude/` into the box user's: `CLAUDE.md`, `settings.json`, `keybindings.json` and the `skills`, `agents`, `commands`, `rules`, `output-styles` and `hooks` folders, following symlinks. It overwrites files of the same name on the box and deletes nothing. It also sets the box's git identity from the laptop's, so a session can commit. Before anything leaves the laptop it lists what it will send, by name and with any symlink's target, and sends nothing on any answer but `yes`. It sends only what that list showed, even if a file is added while it waits. The connectors go to `scripts/04-connectors.sh` on the box, which registers them without printing a key, URL or command line. Afterwards it lists what it copied and names anything to fix by hand: files that mention `/Users/` or the laptop's home directory, imports and `~` paths that point at something that wasn't sent, plugins `settings.json` turns on, and servers registered for one project on the laptop.
+It copies from the laptop's `~/.claude/` into the box user's: `CLAUDE.md`, `settings.json`, `keybindings.json` and the `skills`, `agents`, `commands`, `rules`, `output-styles` and `hooks` folders, following symlinks. It overwrites files of the same name on the box and deletes nothing. It also sets the box's git identity from the laptop's, so a session can commit. Before anything leaves the laptop it lists what it will send, by name and with any symlink's target, and sends nothing on any answer but `yes`. It sends only what that list showed: a file added while it waits isn't sent, and one swapped for another stops the copy. A file with more than one hard link is left out and named, since its other names can't be checked. The connectors go to `scripts/04-connectors.sh` on the box, which registers them without printing a key, URL or command line. Afterwards it lists what it copied and names anything to fix by hand: files that mention `/Users/` or the laptop's home directory, imports and `~` paths that point at something that wasn't sent, plugins `settings.json` turns on, and servers registered for one project on the laptop.
 
 It needs `ssh`, `git` and `python3` on the laptop. A Mac has `python3` once Apple's command line tools are installed (`xcode-select --install`).
 
@@ -188,7 +188,7 @@ It installs a systemd user unit, `claude-rc@<repo>.service`, for each repo in `R
 /opt/cloud-box/scripts/02-tailscale-lockdown.sh close
 ```
 
-It binds sshd to the Tailscale address, turns off root login and passwords for sshd, allows only `BOX_USER`, and sets the firewall to accept nothing from outside the tailnet. Before it changes anything it arms a revert: unless a second prompt confirms a fresh connection worked, the whole change is undone after 300 seconds. When it asks, the owner opens a new connection from their laptop (`ssh <box user>@<box name>`), and the operator answers `yes` only once that has worked. A `yes` that arrives after the 300 seconds is refused, because the revert has already reopened public SSH: run the close again.
+It binds sshd to the Tailscale address, turns off root login and passwords for sshd, allows only `BOX_USER`, and sets the firewall to accept nothing from outside the tailnet. Before it changes anything it arms a revert: unless a second prompt confirms a fresh connection worked, the whole change is undone after 300 seconds. When it asks, the owner opens a new connection from their laptop (`ssh <box user>@<box name>`), and the operator answers `yes` only once that has worked. If the 300 seconds run out first, the revert stops the close, mid-step or at the prompt, and reopens public SSH: run the close again.
 
 ### 10. Handover (operator, root)
 
@@ -198,7 +198,7 @@ Run it in the root session that ran the close: after the close root can't sign i
 /opt/cloud-box/scripts/06-handover.sh
 ```
 
-It refuses until the close has been confirmed with no revert pending, and while sshd would still allow a root login or a password, naming the file responsible. Then it removes the operator's key from root and the box user, prints the fingerprints of the keys left (fingerprints only), and prints the box's final state: the Remote Control servers, the Tailscale name, the sshd settings and every firewall rule for IPv4 and IPv6. It leaves a marker so `01-base.sh` never adds the operator's key again, and sets up nothing for later access. The operator then closes every session, and the owner repeats one short operation from the phone to show the box works as delivered.
+It refuses until the close has been confirmed with no revert pending, and while sshd would still allow a root login or a password, naming the file responsible. It also stops if it can't read a key file or the operator's key is still there after removal. Then it removes the operator's key from root and the box user, prints the fingerprints of the keys left (fingerprints only), and prints the box's final state: the Remote Control servers, the Tailscale name, the sshd settings and every firewall rule for IPv4 and IPv6. It leaves a marker so `01-base.sh` never adds the operator's key again, and sets up nothing for later access. The operator then closes every session, and the owner repeats one short operation from the phone to show the box works as delivered.
 
 If the operator's root session was lost after the close, the owner runs it instead, as root over Tailscale SSH from their laptop: `ssh root@<box name>`.
 
@@ -299,6 +299,7 @@ Not part of a standard setup.
   ```
 
   Its `killagents` helper stops every `claude` process, the Remote Control servers included, which systemd then restarts. `shell/` holds the laptop side: source `shell/laptop.zsh` from `~/.zshrc`, add `shell/gitconfig` as a global `include.path`, point `core.excludesFile` at `shell/gitignore` and symlink `shell/starship.toml` to `~/.config/starship.toml`. The helpers need `mosh`, `fzf`, `fd`, `bat`, `starship` and `pngpaste` from Homebrew
+
 - `optional/supervisor.sh` – brings the Claude Code background-job supervisor back after a reboot, for `claude --bg` jobs. As the box user: `/opt/cloud-box/optional/supervisor.sh`
 
 ## Coming from the blog post
