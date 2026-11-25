@@ -1,8 +1,9 @@
 #!/bin/bash
 # Runs on the owner's laptop (macOS or Linux), never on the box. Copies the
 # owner's Claude Code config, the connectors they choose by name and their git
-# identity to the box user. Take it from the box as the README gives it, so it
-# is always the revision the box runs.
+# identity to the box user. Take it from GitHub at the commit the box runs, as
+# the README gives it, never through a session on the box: the agents can
+# change what a session as the box user serves.
 #
 #   push.sh <box user>@<box's Tailscale name> [--connectors <name,name>|none]
 #           [--replace] [--exclude <path under ~/.claude>]...

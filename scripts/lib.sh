@@ -133,6 +133,30 @@ take_close_lock() {
   flock -n 9 || die "$1"
 }
 
+# The owner's laptop takes push.sh from GitHub at the commit this checkout is
+# at, never through a session on the box: the box user's login files decide
+# what a session as that user serves. Printed by root steps, which the agents
+# can't influence. The single-quoted line is printed as it is, for the laptop's
+# shell to run.
+# shellcheck disable=SC2016
+print_push_line() {
+  local commit origin repo
+  commit=$(git -C "$CLOUD_BOX_DIR" rev-parse HEAD)
+  origin=$(git -C "$CLOUD_BOX_DIR" remote get-url origin 2>/dev/null || true)
+  repo=${origin#https://github.com/}
+  repo=${repo#git@github.com:}
+  repo=${repo%.git}
+  if ! [[ $repo =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+    echo "    !! origin ($origin) is not a GitHub repo, so there is no URL for the laptop. Push this commit to GitHub first"
+    return 0
+  fi
+  [ -z "$(git -C "$CLOUD_BOX_DIR" status --porcelain --untracked-files=no)" ] ||
+    echo "    !! this checkout has local changes, so the laptop's copy of push.sh may not match what the box runs"
+  echo "    This checkout is at $commit. On the owner's laptop, step 5 of the README runs:"
+  printf '      ( d=$(mktemp -d) || exit 1; trap %s EXIT; curl -fsSL -o "$d/push.sh" https://raw.githubusercontent.com/%s/%s/laptop/push.sh && /bin/bash "$d/push.sh" %s@<box name> --connectors <name,name> )\n' \
+    "'rm -rf \"\$d\"'" "$repo" "$commit" "$BOX_USER"
+}
+
 in_list() {
   local needle=$1 item
   shift

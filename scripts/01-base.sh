@@ -138,4 +138,7 @@ grep -q '\.bun/bin' ~/.profile || echo 'export PATH="$HOME/.bun/bin:$PATH"' >> ~
 "$HOME/.local/bin/claude" --version
 USERSETUP
 
+echo "==> push.sh for the owner's laptop"
+print_push_line
+
 echo "==> Done. Next: 02-tailscale-lockdown.sh up"

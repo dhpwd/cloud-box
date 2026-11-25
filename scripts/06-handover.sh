@@ -42,6 +42,8 @@ echo "--- sshd"
 echo "--- ufw"
 ufw status verbose || unreadable
 # ufw status shows only ufw's own rules. Tailscale adds chains of its own.
+echo "--- push.sh for the owner's laptop, for any later re-run"
+print_push_line || unreadable
 echo "--- every firewall rule, IPv4 and IPv6"
 if command -v nft >/dev/null; then
   nft list ruleset || unreadable

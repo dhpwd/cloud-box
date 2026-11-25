@@ -76,7 +76,7 @@ To build from a particular revision, `git -C /opt/cloud-box checkout <commit>` b
 
 The checkout and `box.env` stay owned by root and not writable by the box user: root runs scripts from there later, and the agents' account must not be able to change what root runs. Every root script checks this and stops if it isn't so.
 
-`01-base.sh` installs git, the build tools, the GitHub CLI, ufw (left off until the close) and unattended security upgrades, creates the box user and adds `OPERATOR_PUBKEY` to its `authorized_keys`, turns on lingering so the user's services survive logout, and makes public SSH key-only. It then installs, as the box user, Node (pinned, through nvm), pnpm, bun, uv, pre-commit and Claude Code (the native installer). It prints sshd's effective settings for root and the box user and stops if either still allows a password. It needs no terminal and is safe to run again.
+`01-base.sh` installs git, the build tools, the GitHub CLI, ufw (left off until the close) and unattended security upgrades, creates the box user and adds `OPERATOR_PUBKEY` to its `authorized_keys`, turns on lingering so the user's services survive logout, and makes public SSH key-only. It then installs, as the box user, Node (pinned, through nvm), pnpm, bun, uv, pre-commit and Claude Code (the native installer). It prints sshd's effective settings for root and the box user and stops if either still allows a password. It ends by printing the commit the checkout is at and the laptop line for step 5. It needs no terminal and is safe to run again.
 
 ### 2. Tailscale (operator, root – then the owner)
 
@@ -126,11 +126,13 @@ A repo's own tracked `.mcp.json` arrives with its clone. If it reads environment
 
 ### 5. Config, connectors and files (owner's laptop)
 
-The laptop takes `push.sh` from the box, so it is always the revision the box is running. If the checkout isn't at `/opt/cloud-box`, use its path in the `scp` and set `BOX_REPO` to it in front of `/bin/bash`:
+The laptop takes `push.sh` from GitHub at the commit the box runs, so it is always the box's revision. It never copies it through a session on the box: the agents can change what a session as the box user serves. `01-base.sh` prints the commit and this line with it filled in, and `06-handover.sh` prints them again. To see the commit later, as root on the box: `git -C /opt/cloud-box rev-parse HEAD`.
 
 ```bash
-( d=$(mktemp -d) || exit 1; trap 'rm -rf "$d"' EXIT; scp <box user>@<box name>:/opt/cloud-box/laptop/push.sh "$d/push.sh" && /bin/bash "$d/push.sh" <box user>@<box name> --connectors <name,name> )
+( d=$(mktemp -d) || exit 1; trap 'rm -rf "$d"' EXIT; curl -fsSL -o "$d/push.sh" https://raw.githubusercontent.com/dhpwd/cloud-box/<commit>/laptop/push.sh && /bin/bash "$d/push.sh" <box user>@<box name> --connectors <name,name> )
 ```
+
+A failed download runs nothing, and the line's exit status is the download's or the script's. Building from a fork, use the fork's owner and name in the URL (`01-base.sh` takes them from the checkout's `origin`). If the checkout isn't at `/opt/cloud-box`, set `BOX_REPO` to its path in front of `/bin/bash`.
 
 Arguments after `<box user>@<box name>`:
 
@@ -198,7 +200,7 @@ Run it in the root session that ran the close: after the close root can't sign i
 /opt/cloud-box/scripts/06-handover.sh
 ```
 
-It refuses until the close has been confirmed with no revert pending, and while sshd would still allow a root login or a password, naming the file responsible. It also stops if it can't read a key file or the operator's key is still there after removal. Then it removes the operator's key from root and the box user, prints the fingerprints of the keys left (fingerprints only), and prints the box's final state: the Remote Control servers, the Tailscale name, the sshd settings and every firewall rule for IPv4 and IPv6. It leaves a marker so `01-base.sh` never adds the operator's key again, and sets up nothing for later access. The operator then closes every session, and the owner repeats one short operation from the phone to show the box works as delivered.
+It refuses until the close has been confirmed with no revert pending, and while sshd would still allow a root login or a password, naming the file responsible. It also stops if it can't read a key file or the operator's key is still there after removal. Then it removes the operator's key from root and the box user, prints the fingerprints of the keys left (fingerprints only), and prints the box's final state: the Remote Control servers, the Tailscale name, the sshd settings, the laptop line for any later re-run of `push.sh` and every firewall rule for IPv4 and IPv6. It leaves a marker so `01-base.sh` never adds the operator's key again, and sets up nothing for later access. The operator then closes every session, and the owner repeats one short operation from the phone to show the box works as delivered.
 
 If the operator's root session was lost after the close, the owner runs it instead, as root over Tailscale SSH from their laptop: `ssh root@<box name>`.
 

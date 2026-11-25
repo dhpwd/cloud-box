@@ -42,10 +42,20 @@ stub() {
 
 for c in apt apt-get bun pnpm npm pre-commit journalctl scp; do stub "$c"; done
 stub ufw 'case "$1 $2" in "--force reset") [ -z "${STUB_UFW_SLOW:-}" ] || sleep 3 ;; esac'
-for c in curl sudo dpkg adduser useradd usermod gpasswd passwd locale-gen update-locale getent; do
+for c in sudo dpkg adduser useradd usermod gpasswd passwd locale-gen update-locale getent; do
   stub "$c" 'echo "stub: $0 must not run in tests" >&2; exit 1'
 done
 stub uv 'case $1 in tool) exit 0 ;; esac'
+# Serves laptop/push.sh from the commit a raw.githubusercontent.com URL names,
+# as GitHub would, and refuses anything else. With STUB_CURL_FAIL it writes the
+# file and then fails, as a transfer cut off part-way can.
+stub curl 'out=; url=
+while [ $# -gt 0 ]; do case $1 in -o) out=$2; shift 2 ;; -*) shift ;; *) url=$1; shift ;; esac; done
+case $url in
+  https://raw.githubusercontent.com/*/laptop/push.sh) sha=${url%/laptop/push.sh}; git -C "$STUB_REPO" show "${sha##*/}:laptop/push.sh" >"$out" ;;
+  *) echo "stub: unexpected curl $url" >&2; exit 1 ;;
+esac
+[ -z "${STUB_CURL_FAIL:-}" ] || exit 22'
 stub nft 'echo "table inet filter { chain input { policy drop; } }"'
 stub iptables 'echo "-P INPUT DROP"'
 stub ip6tables 'echo "-P INPUT DROP"'
@@ -100,7 +110,7 @@ OTHER_BLOB=$(awk '{ print $2 }' <<<"$OTHERKEY")
 # plus any NAME=value arguments given before the script.
 run() {
   env -i HOME="$T/home" TMPDIR="$T/tmp" LANG=C.UTF-8 PATH="$STUBS:/usr/bin:/bin:/usr/sbin:/sbin" \
-    STUB_LOG="$LOG" STUB_DIR="$T" BOX_ENV_FILE="$T/no-box.env" \
+    STUB_LOG="$LOG" STUB_DIR="$T" STUB_REPO="$REPO" BOX_ENV_FILE="$T/no-box.env" \
     CLOUD_BOX_STATE_DIR="$T/state" CLOUD_BOX_RUN_DIR="$T/run" \
     SSHD_CONFIG="$T/sshd/sshd_config" SSHD_CONFIG_D="$T/sshd/d" \
     ROOT_AUTHORIZED_KEYS="$T/keys/root_ak" USER_AUTHORIZED_KEYS="$T/keys/user_ak" \
@@ -451,6 +461,34 @@ else
   ok "push.sh sends nothing unless the answer is yes"
 fi
 
+HEAD_SHA=$(git -C "$REPO" rev-parse HEAD)
+readme_line=$(grep -F 'raw.githubusercontent.com/' "$REPO/README.md" | grep -F '/laptop/push.sh' | head -1)
+if [[ $readme_line != *'d=$(mktemp -d)'* || $readme_line != *'curl -fsSL -o "$d/push.sh" https://raw.githubusercontent.com/'* ||
+  $readme_line != *'/<commit>/laptop/push.sh && /bin/bash "$d/push.sh" '* || $readme_line =~ \|[[:space:]]*(/bin/)?(ba)?sh ]] ||
+  grep -qF ':/opt/cloud-box/laptop/push.sh' "$REPO/README.md"; then
+  bad "the README's push.sh line downloads at a commit to a private file, then runs it with /bin/bash" "$readme_line"
+else
+  ok "the README's push.sh line downloads at a commit to a private file, then runs it with /bin/bash"
+fi
+cmd=${readme_line//<commit>/$HEAD_SHA}
+cmd=${cmd//<box user>@<box name>/agent@box}
+cmd=${cmd//<name,name>/none}
+push_fixture
+out=$(printf 'yes\n' | run bash -c "$cmd" 2>&1) || true
+if [ -z "$(ssh_call_with tar)" ]; then
+  bad "the README's push.sh line runs push.sh from the commit it names" "$out"
+else
+  ok "the README's push.sh line runs push.sh from the commit it names"
+fi
+push_fixture
+if out=$(printf 'yes\n' | run STUB_CURL_FAIL=1 bash -c "$cmd" 2>&1); then
+  bad "the README's push.sh line exits non-zero when the download fails" "$out"
+elif [ -n "$(ls "$T/ssh" 2>/dev/null)" ]; then
+  bad "the README's push.sh line runs nothing when the download fails" "$out"
+else
+  ok "the README's push.sh line runs nothing when the download fails"
+fi
+
 # ---- 04-connectors.sh --------------------------------------------------------
 
 fresh_home
@@ -571,6 +609,11 @@ elif [ ! -e "$T/state/handed-over" ]; then
   bad "handover leaves its marker" "$out"
 else
   ok "handover removes the operator's key from both files, keeps the other, prints fingerprints only"
+fi
+if [[ $out == *"/$HEAD_SHA/laptop/push.sh && /bin/bash \"\$d/push.sh\" agent@<box name>"* && $out == *'curl -fsSL -o "$d/push.sh"'* ]]; then
+  ok "handover prints the laptop's push.sh line at the checkout's commit"
+else
+  bad "handover prints the laptop's push.sh line at the checkout's commit" "$out"
 fi
 printf '%s\n' "$OTHERKEY" >"$T/keys/user_ak"
 grant >/dev/null
