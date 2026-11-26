@@ -424,6 +424,28 @@ if [[ $out == *"skills/good/notes  -> $T/elsewhere/notes.md"* ]]; then
 else
   bad "push.sh previews a symlink inside a skill with its target" "$out"
 fi
+push_fixture
+rm "$T/home/.claude.json"
+mkfifo "$T/home/.claude.json"
+(
+  exec 7>"$T/home/.claude.json"
+  echo "{\"mcpServers\": {\"x\": {\"headers\": {\"K\": \"$SENTINEL\"}}}}" >"$T/home/.claude.json.backup.late"
+  ln -s "$T/home/.claude.json.backup.late" "$T/home/.claude/skills/good/latelink"
+  echo '{}' >&7
+  exec 7>&-
+  # Any later open reads a plain file, so nothing else waits on the pipe.
+  rm -f "$T/home/.claude.json"
+  echo '{}' >"$T/home/.claude.json"
+) &
+writer=$!
+late=$(printf 'no\n' | run timeout 30 bash "$REPO/laptop/push.sh" agent@box --connectors none 2>&1) || true
+kill "$writer" 2>/dev/null || true
+wait "$writer" || true
+if [[ $late != *"skills/good/latelink: points into a backup of Claude Code's state"* ]]; then
+  bad "push.sh drops a link to a backup written after it listed the home directory" "$late"
+else
+  ok "push.sh drops a link to a backup written after it listed the home directory"
+fi
 
 push_fixture
 out=$(printf 'yes\n' | run bash "$REPO/laptop/push.sh" agent@box --connectors none 2>&1) || true
@@ -606,6 +628,26 @@ else
   ok "04-connectors.sh reports a status list it couldn't read"
 fi
 
+line=$(grep -F 'find /opt/cloud-box' "$REPO/README.md" | grep -F '06-handover.sh' || true)
+mkdir -p "$T/hc/cb/scripts"
+printf '#!/bin/bash\necho HANDOVER-RAN\n' >"$T/hc/cb/scripts/06-handover.sh"
+chmod -R go-w "$T/hc"
+chmod 755 "$T/hc/cb/scripts/06-handover.sh"
+f=${line//\/opt\/cloud-box/$T/hc/cb}
+f=${f//! -uid 0/! -uid $(id -u)}
+clean=$(bash -c "$f" 2>&1) || true
+ln -s nowhere "$T/hc/cb/scripts/link"
+linked=$(bash -c "$f" 2>&1) || true
+rm -rf "$T/hc"
+if [[ $line != *'out=$(find /opt/cloud-box \( -type l -o ! -uid 0 -o -perm /022 \) -print -quit)'* ]] ||
+  [[ $line != *'&& /opt/cloud-box/scripts/06-handover.sh' ]]; then
+  bad "the README's handover line checks the checkout first" "$line"
+elif [ "$clean" != HANDOVER-RAN ] || [[ $linked == *HANDOVER-RAN* ]] || [[ $linked != "refusing: "*"/scripts/link is a symlink"* ]]; then
+  bad "the README's handover line runs the handover only from a clean checkout" "clean: $clean"$'\n'"linked: $linked"
+else
+  ok "the README's handover line runs the handover only from a clean checkout"
+fi
+
 # ---- keys: base and handover -------------------------------------------------
 
 grant() { run bash -c '. "$1" && read_inputs && grant_operator_key' _ "$REPO/scripts/lib.sh" 2>&1; }
@@ -695,7 +737,7 @@ fi
 handover_fixture
 out=$(run STUB_UID=0 STUB_PUSH_DIFF=1 bash "$REPO/scripts/06-handover.sh" 2>&1) || true
 if [[ $out == *raw.githubusercontent.com* ]] || [[ $out != *"laptop/push.sh here differs from $HEAD_SHA"* ]] ||
-  [[ $out != *"show HEAD:laptop/push.sh > "*"/laptop/push.sh.new && mv "* ]]; then
+  [[ $out != *'t=$(mktemp '*'/laptop/push.sh.XXXXXX) && git -C '*' show HEAD:laptop/push.sh >"$t" && chmod 755 "$t" && mv "$t" '*' || rm -f "$t"'* ]]; then
   bad "handover prints no laptop line when laptop/push.sh differs from the commit" "$out"
 else
   ok "handover prints no laptop line when laptop/push.sh differs from the commit"
@@ -787,7 +829,7 @@ cp -r "$REPO/scripts" "$T/ls/real-scripts"
 chmod -R go-w "$T/ls"
 ln -s ../real-scripts "$T/ls/repo/scripts"
 if out=$(run STUB_UID=0 CLOUD_BOX_TRUSTED_DIR="$T" bash "$T/ls/repo/scripts/06-handover.sh" 2>&1) ||
-  [[ $out != *"$T/ls/repo/scripts can be changed by an account other than root"* ]]; then
+  [[ $out != *"$T/ls/repo/scripts is a symlink, which a root step won't run through"* ]]; then
   bad "a root script refuses a checkout holding a symlink" "$out"
 else
   ok "a root script refuses a checkout holding a symlink"

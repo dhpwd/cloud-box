@@ -194,10 +194,10 @@ It binds sshd to the Tailscale address, turns off root login and passwords for s
 
 ### 10. Handover (operator, root)
 
-Run it in the root session that ran the close: after the close root can't sign in over SSH, and the operator isn't on the tailnet.
+Run it in the root session that ran the close: after the close root can't sign in over SSH, and the operator isn't on the tailnet. The agents have run on the box by now, so the line first checks the checkout from root's own shell, and runs nothing if anything in it is a symlink, isn't root's, or can be written by another account:
 
 ```bash
-/opt/cloud-box/scripts/06-handover.sh
+out=$(find /opt/cloud-box \( -type l -o ! -uid 0 -o -perm /022 \) -print -quit); [ -z "$out" ] || { echo "refusing: $out is a symlink, isn't root's, or can be written by another account. Make a fresh clone"; false; } && /opt/cloud-box/scripts/06-handover.sh
 ```
 
 It refuses until the close has been confirmed with no revert pending, and while sshd would still allow a root login or a password, naming the file responsible. It also stops if it can't read a key file or the operator's key is still there after removal. Then it removes the operator's key from root and the box user, prints the fingerprints of the keys left (fingerprints only), and prints the box's final state: the Remote Control servers, the Tailscale name, the sshd settings, the laptop line for any later re-run of `push.sh` and every firewall rule for IPv4 and IPv6. It leaves a marker so `01-base.sh` never adds the operator's key again, and sets up nothing for later access. The operator then closes every session, and the owner repeats one short operation from the phone to show the box works as delivered.
@@ -255,7 +255,7 @@ One rule wherever a setup stops: if the owner's laptop has reached the box over 
 - **After step 5:** the config, connectors and git identity are on the box. Running `push.sh` again overwrites files of the same name and leaves registered connectors alone
 - **After steps 6 and 7:** any repo whose trust step was missed has no running server. `05-remote-control.sh` names it, and running it again after the trust step starts it
 - **After step 8:** the box is in use
-- **After step 9, before step 10:** the box is closed but the operator's key is still on it. The owner runs `06-handover.sh` as root over Tailscale SSH
+- **After step 9, before step 10:** the box is closed but the operator's key is still on it. The owner runs step 10's line as root over Tailscale SSH
 
 ## Getting back in, and getting help
 

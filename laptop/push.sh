@@ -147,6 +147,10 @@ FORBIDDEN_DIRS = [(ident(d), why) for d, why in [
 def forbidden(rp):
     if ident(rp) in FORBIDDEN_FILES:
         return FORBIDDEN_FILES[ident(rp)]
+    # By name too, where the path resolves, for a backup written after the
+    # listing above.
+    if ident(os.path.dirname(rp)) == ident(HOME) and os.path.basename(rp).lower().startswith(".claude.json.backup"):
+        return "a backup of Claude Code's state (~/.claude.json.backup)"
     if os.path.isfile(rp) and HISTORY.match(os.path.basename(rp)):
         return "a history file"
     p = rp
