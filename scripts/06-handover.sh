@@ -22,8 +22,8 @@ require_sshd_key_only root "$BOX_USER"
 [ "$(sshd_setting root permitrootlogin)" = no ] ||
   die "sshd still allows a root login. The first file that sets PermitRootLogin is $(sshd_first_setter permitrootlogin)"
 
-require_recorded_grant
 take_keys_lock
+require_recorded_grant
 mkdir -p "$CLOUD_BOX_STATE_DIR"
 touch "$HANDED_OVER_MARKER"
 

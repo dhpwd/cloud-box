@@ -123,7 +123,7 @@ while IFS= read -r line; do
     echo "    $n: $s"
     [ "$s" != "needs sign-in" ] || needs_login+=("$n")
   fi
-done <<<"$list"
+done < <(printf '%s\n' "$list")
 if [ "$list_rc" -ne 0 ]; then
   echo "    !! claude mcp list ended with an error, so the statuses above may be incomplete"
   attention=1

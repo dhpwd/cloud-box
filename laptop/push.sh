@@ -70,7 +70,7 @@ command -v git >/dev/null || die "git is missing on this laptop"
 python3 -c '' >/dev/null 2>&1 || die "python3 is missing on this laptop. On a Mac: xcode-select --install"
 
 read -r -d '' PY <<'PYEOF' || true
-import json, os, re, shutil, stat, sys, tarfile
+import glob, json, os, re, shutil, stat, sys, tarfile
 
 mode = sys.argv[1]
 chosen = [n.strip() for n in sys.argv[2].split(",") if n.strip()]
@@ -128,6 +128,8 @@ FORBIDDEN_FILES = {
     ident(CLAUDE_JSON): "Claude Code's own state (~/.claude.json)",
     ident(os.path.join(CLAUDE, ".credentials.json")): "Claude Code's sign-in",
 }
+for b in glob.glob(os.path.join(HOME, ".claude.json.backup*")):
+    FORBIDDEN_FILES[ident(b)] = "a backup of Claude Code's state (~/.claude.json.backup)"
 FORBIDDEN_FILES.pop(None, None)
 FORBIDDEN_DIRS = [(ident(d), why) for d, why in [
     (os.path.join(CLAUDE, "projects"), "~/.claude/projects"),

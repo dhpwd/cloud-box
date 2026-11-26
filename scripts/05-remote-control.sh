@@ -124,7 +124,15 @@ while read -r u _; do
   r=${r%.service}
   in_list "$r" "${RC_DIRS[@]}" ||
     echo "    note: claude-rc@$r is set up but not in RC_REPOS, and an enabled one starts again at boot. To remove it: systemctl --user disable --now claude-rc@$r"
-done < <(systemctl --user list-units 'claude-rc@*' --all --plain --no-legend 2>/dev/null)
+done < <(
+  {
+    systemctl --user list-units 'claude-rc@*' --all --plain --no-legend 2>/dev/null
+    # Enabled on disk starts at the next boot, loaded now or not.
+    for f in "$HOME"/.config/systemd/user/*.wants/claude-rc@*.service; do
+      [ ! -L "$f" ] || echo "${f##*/}"
+    done
+  } | awk '!seen[$1]++'
+)
 
 if [ -n "$started" ]; then
   echo "==> Waiting 20s, then checking the servers stayed up"

@@ -14,7 +14,7 @@
 set -euo pipefail
 trap 'echo "tests/run.sh stopped at line $LINENO" >&2' ERR
 
-REPO=$(cd "$(dirname "$0")/.." && pwd)
+REPO=$(cd "$(dirname "$0")/.." && pwd -P)
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 STUBS="$T/stubs"
@@ -81,7 +81,8 @@ stub git 'case " $* " in
   *" pull "*) exit "${STUB_GIT_PULL:-0}" ;;
   *" remote get-url origin "*) echo "${STUB_ORIGIN:-https://github.com/example-org/cloud-box.git}"; exit 0 ;;
   *" status --porcelain "*) exit 0 ;;
-  *" diff --quiet HEAD -- laptop/push.sh "*) exit "${STUB_PUSH_DIFF:-0}" ;;
+  *" hash-object --no-filters laptop/push.sh "*) echo "${STUB_PUSH_DIFF:+changed-}blob"; exit 0 ;;
+  *" rev-parse "*":laptop/push.sh "*) echo blob; exit 0 ;;
 esac
 exec /usr/bin/git "$@"'
 stub tailscale 'case $1 in ip) echo 100.64.0.1 ;; status) echo "{\"Self\":{\"DNSName\":\"box.example.ts.net.\"}}" ;; esac'
@@ -132,6 +133,7 @@ run() {
     CLOUD_BOX_STATE_DIR="$T/state" CLOUD_BOX_RUN_DIR="$T/run" \
     SSHD_CONFIG="$T/sshd/sshd_config" SSHD_CONFIG_D="$T/sshd/d" \
     ROOT_AUTHORIZED_KEYS="$T/keys/root_ak" USER_AUTHORIZED_KEYS="$T/keys/user_ak" \
+    CLOUD_BOX_TRUSTED_DIR="$(dirname "$REPO")" \
     BOX_USER=agent OPERATOR_PUBKEY="$OPKEY" REPOS="app=example-org/app api=example-org/api-server" \
     "$@"
 }
@@ -262,6 +264,17 @@ if [[ $out != *"claude-rc@old is set up but not in RC_REPOS"* ]]; then
 else
   ok "05-remote-control.sh names a stopped server that isn't in RC_REPOS"
 fi
+mkdir -p "$T/home/.config/systemd/user/default.target.wants"
+ln -sfn /dev/null "$T/home/.config/systemd/user/default.target.wants/claude-rc@gone.service"
+out=$(run REPOS="app=org/app" RC_REPOS="app:writer" STUB_ACTIVE=yes \
+  STUB_PS_ARGS="claude remote-control --spawn same-dir --name app --settings $rc/app.json" \
+  bash "$REPO/scripts/05-remote-control.sh" 2>&1) || true
+rm -f "$T/home/.config/systemd/user/default.target.wants/claude-rc@gone.service"
+if [[ $out != *"claude-rc@gone is set up but not in RC_REPOS"* ]]; then
+  bad "05-remote-control.sh names a server enabled on disk that isn't in RC_REPOS" "$out"
+else
+  ok "05-remote-control.sh names a server enabled on disk that isn't in RC_REPOS"
+fi
 
 # ---- 03-repos.sh --clone-only ------------------------------------------------
 
@@ -324,6 +337,8 @@ JSON
   mkdir -p "$h/.claude/backups" "$h/.claude/skills/good/node_modules/dep"
   echo "{\"mcpServers\": {\"x\": {\"headers\": {\"K\": \"$SENTINEL\"}}}}" >"$h/.claude/backups/.claude.json.backup.1"
   ln -s "$h/.claude/backups/.claude.json.backup.1" "$h/.claude/skills/good/backup"
+  echo "{\"mcpServers\": {\"x\": {\"headers\": {\"K\": \"$SENTINEL\"}}}}" >"$h/.claude.json.backup"
+  ln -s "$h/.claude.json.backup" "$h/.claude/skills/good/oldbackup"
   echo "module.exports = 1" >"$h/.claude/skills/good/node_modules/dep/index.js"
   echo "$SENTINEL commands" >"$T/elsewhere/fish_history"
   ln -s "$T/elsewhere/fish_history" "$h/.claude/skills/good/fishlink"
@@ -381,6 +396,8 @@ elif grep -qx 'skills/good/sshlink' <<<"$members" || [[ $out != *"skills/good/ss
   bad "push.sh drops and names a hard link to a file in ~/.ssh" "$members"
 elif grep -qx 'skills/good/backup' <<<"$members" || [[ $out != *"skills/good/backup: points into ~/.claude/backups"* ]]; then
   bad "push.sh drops and names a link into ~/.claude/backups" "$out"
+elif grep -qx 'skills/good/oldbackup' <<<"$members" || [[ $out != *"skills/good/oldbackup: points into a backup of Claude Code's state"* ]]; then
+  bad "push.sh drops and names a link to a ~/.claude.json backup beside it" "$out"
 elif grep -q 'skills/good/node_modules' <<<"$members" || [[ $out != *"skills/good/node_modules: not copied: install or clone it on the box"* ]]; then
   bad "push.sh leaves out a skill's node_modules and names it" "$out"
 elif grep -qx 'skills/good/fishlink' <<<"$members"; then
@@ -638,6 +655,7 @@ handover_fixture() {
   touch "$T/state/closed"
   printf '%s\n%s\n' "$OPKEY" "$OTHERKEY" >"$T/keys/root_ak"
   printf 'no-pty %s\n%s\n' "$OPKEY" "$OTHERKEY" >"$T/keys/user_ak"
+  printf 'agent %s\n' "$OP_BLOB" >"$T/state/operator-grant"
   : >"$LOG"
 }
 
@@ -669,7 +687,8 @@ else
 fi
 handover_fixture
 out=$(run STUB_UID=0 STUB_PUSH_DIFF=1 bash "$REPO/scripts/06-handover.sh" 2>&1) || true
-if [[ $out == *raw.githubusercontent.com* ]] || [[ $out != *"laptop/push.sh here differs from $HEAD_SHA"* ]]; then
+if [[ $out == *raw.githubusercontent.com* ]] || [[ $out != *"laptop/push.sh here differs from $HEAD_SHA"* ]] ||
+  [[ $out != *"checkout HEAD -- laptop/push.sh"* ]]; then
   bad "handover prints no laptop line when laptop/push.sh differs from the commit" "$out"
 else
   ok "handover prints no laptop line when laptop/push.sh differs from the commit"
@@ -685,16 +704,55 @@ else
   ok "handover refuses inputs that don't name the key the base granted, before changing anything"
 fi
 handover_fixture
+rm -f "$T/state/operator-grant"
+if out=$(run STUB_UID=0 bash "$REPO/scripts/06-handover.sh" 2>&1) || [[ $out != *"holds no record of the key 01-base.sh granted"* ]] ||
+  [ -e "$T/state/handed-over" ]; then
+  bad "handover refuses when no grant is on record, before changing anything" "$out"
+else
+  ok "handover refuses when no grant is on record, before changing anything"
+fi
+# A base run that records another grant while the handover waits for the keys
+# lock: the handover reads the record only once it holds the lock.
+handover_fixture
+mkdir -p "$T/run"
+(
+  exec 8>"$T/run/keys.lock"
+  flock 8
+  touch "$T/held"
+  sleep 1.5
+  printf 'agent %s\n' "$OTHER_BLOB" >>"$T/state/operator-grant"
+) &
+holder=$!
+for _ in $(seq 40); do
+  [ -e "$T/held" ] && break
+  sleep 0.05
+done
+out=$(run STUB_UID=0 bash "$REPO/scripts/06-handover.sh" 2>&1) && rc=0 || rc=$?
+wait "$holder" || true
+rm -f "$T/held"
+if [ "$rc" -eq 0 ] || [[ $out != *"granted agent a key that this run's BOX_USER and OPERATOR_PUBKEY don't name"* ]]; then
+  bad "handover reads the recorded grant only once it holds the keys lock" "$out"
+else
+  ok "handover reads the recorded grant only once it holds the keys lock"
+fi
+handover_fixture
 mkdir -p "$T/wp/repo"
 cp -r "$REPO/scripts" "$T/wp/repo/"
 chmod -R go-w "$T/wp/repo"
 chmod 775 "$T/wp"
-if out=$(run STUB_UID=0 bash "$T/wp/repo/scripts/06-handover.sh" 2>&1) || [[ $out != *"$T/wp can be changed by an account other than root"* ]]; then
+if out=$(run STUB_UID=0 CLOUD_BOX_TRUSTED_DIR="$T" bash "$T/wp/repo/scripts/06-handover.sh" 2>&1) || [[ $out != *"$T/wp can be changed by an account other than root"* ]]; then
   bad "a root script refuses a checkout inside a directory another account can write" "$out"
 else
   ok "a root script refuses a checkout inside a directory another account can write"
 fi
-rm -rf "$T/wp"
+mkdir -p "$T/safe"
+ln -s "$T/wp/repo" "$T/safe/link"
+if out=$(run STUB_UID=0 CLOUD_BOX_TRUSTED_DIR="$T" bash "$T/safe/link/scripts/06-handover.sh" 2>&1) || [[ $out != *"$T/wp can be changed by an account other than root"* ]]; then
+  bad "a root script reached through a symlink checks where the checkout really lives" "$out"
+else
+  ok "a root script reached through a symlink checks where the checkout really lives"
+fi
+rm -rf "$T/wp" "$T/safe"
 handover_fixture
 out=$(run STUB_UID=0 STUB_ORIGIN="https://someone:SECRETTOKEN999@github.com/example-org/cloud-box.git" bash "$REPO/scripts/06-handover.sh" 2>&1) || true
 if [[ $out == *SECRETTOKEN999* ]] || [[ $out != *"isn't a github.com URL this can read"* ]]; then
@@ -810,7 +868,8 @@ wait_lock_free() {
 }
 close_fixture() {
   rm -rf "$T/state" "$T/run" "$T/sshd/d"
-  mkdir -p "$T/sshd/d"
+  mkdir -p "$T/sshd/d" "$T/state"
+  printf 'agent %s\n' "$OP_BLOB" >"$T/state/operator-grant"
   : >"$LOG"
 }
 

@@ -8,7 +8,8 @@
 # tests/run.sh can run the scripts against a temporary directory. Nothing on a
 # box sets them.
 
-CLOUD_BOX_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# Resolved, so the checks on it see where the checkout really lives.
+CLOUD_BOX_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
 CLOUD_BOX_LIB="$CLOUD_BOX_DIR/scripts/lib.sh"
 BOX_ENV_FILE=${BOX_ENV_FILE:-$CLOUD_BOX_DIR/box.env}
 CLOUD_BOX_STATE_DIR=${CLOUD_BOX_STATE_DIR:-/etc/cloud-box}
@@ -205,7 +206,7 @@ revert_close() {
 # shell to run.
 # shellcheck disable=SC2016
 print_push_line() {
-  local commit origin repo box_repo=
+  local commit origin repo blob box_repo=
   commit=$(git -C "$CLOUD_BOX_DIR" rev-parse HEAD)
   origin=$(git -C "$CLOUD_BOX_DIR" remote get-url origin 2>/dev/null || true)
   repo=${origin#https://github.com/}
@@ -215,8 +216,11 @@ print_push_line() {
     echo "    !! this checkout's origin isn't a github.com URL this can read, so there is no URL for the laptop. Push this commit to GitHub first"
     return 0
   fi
-  if ! git -C "$CLOUD_BOX_DIR" diff --quiet HEAD -- laptop/push.sh 2>/dev/null; then
-    echo "    !! laptop/push.sh here differs from $commit, so there is no line for the laptop. Commit and push the change, or undo it with: git -C $CLOUD_BOX_DIR checkout -- laptop/push.sh"
+  # The file's bytes against the committed blob, which a flag such as
+  # assume-unchanged can't hide.
+  blob=$(git -C "$CLOUD_BOX_DIR" rev-parse "$commit:laptop/push.sh" 2>/dev/null || true)
+  if [ -z "$blob" ] || [ "$(git -C "$CLOUD_BOX_DIR" hash-object --no-filters laptop/push.sh 2>/dev/null)" != "$blob" ]; then
+    echo "    !! laptop/push.sh here differs from $commit, so there is no line for the laptop. Commit and push the change, or undo it with: git -C $CLOUD_BOX_DIR checkout HEAD -- laptop/push.sh"
     return 0
   fi
   [ "$CLOUD_BOX_DIR" = /opt/cloud-box ] || box_repo="BOX_REPO=$(printf '%q' "$CLOUD_BOX_DIR") "
@@ -244,6 +248,8 @@ require_root() {
   local d=$CLOUD_BOX_DIR
   while [ "$d" != / ]; do
     d=$(dirname "$d")
+    # The tests set this, so they don't depend on where their checkout sits.
+    [ "$d" != "${CLOUD_BOX_TRUSTED_DIR:-}" ] || break
     found=$(find "$d" -maxdepth 0 \( ! -uid 0 ! -uid "$EUID" -o -perm /022 \) -print)
     [ -z "$found" ] || die "$d can be changed by an account other than root, so the checkout inside it could be replaced. Put the checkout at /opt/cloud-box"
   done
@@ -430,13 +436,18 @@ grant_operator_key() {
 # the base granted, which it would otherwise report removed while the granted
 # key stays.
 require_recorded_grant() {
-  local line want
-  [ -e "$GRANTS_FILE" ] || return 0
+  local line want found=
   want="$BOX_USER $(key_blob "$OPERATOR_PUBKEY")"
-  while IFS= read -r line; do
-    [ -z "$line" ] || [ "$line" = "$want" ] ||
-      die "01-base.sh granted ${line%% *} a key that this run's BOX_USER and OPERATOR_PUBKEY don't name. Run this with the inputs 01-base.sh ran with, or remove that key by hand and its line from $GRANTS_FILE"
-  done <"$GRANTS_FILE"
+  if [ -e "$GRANTS_FILE" ]; then
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      [ "$line" = "$want" ] ||
+        die "01-base.sh granted ${line%% *} a key that this run's BOX_USER and OPERATOR_PUBKEY don't name. Run this with the inputs 01-base.sh ran with, or remove that key by hand and its line from $GRANTS_FILE"
+      found=1
+    done <"$GRANTS_FILE"
+  fi
+  [ -n "$found" ] ||
+    die "$GRANTS_FILE holds no record of the key 01-base.sh granted, so which key to remove can't be checked. Run 01-base.sh with the inputs it first ran with, which records it, then run this"
 }
 
 revoke_operator_key() {
