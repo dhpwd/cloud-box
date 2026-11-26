@@ -70,7 +70,7 @@ command -v git >/dev/null || die "git is missing on this laptop"
 python3 -c '' >/dev/null 2>&1 || die "python3 is missing on this laptop. On a Mac: xcode-select --install"
 
 read -r -d '' PY <<'PYEOF' || true
-import glob, json, os, re, shutil, stat, sys, tarfile
+import json, os, re, shutil, stat, sys, tarfile
 
 mode = sys.argv[1]
 chosen = [n.strip() for n in sys.argv[2].split(",") if n.strip()]
@@ -128,8 +128,6 @@ FORBIDDEN_FILES = {
     ident(CLAUDE_JSON): "Claude Code's own state (~/.claude.json)",
     ident(os.path.join(CLAUDE, ".credentials.json")): "Claude Code's sign-in",
 }
-for b in glob.glob(os.path.join(HOME, ".claude.json.backup*")):
-    FORBIDDEN_FILES[ident(b)] = "a backup of Claude Code's state (~/.claude.json.backup)"
 FORBIDDEN_FILES.pop(None, None)
 FORBIDDEN_DIRS = [(ident(d), why) for d, why in [
     (os.path.join(CLAUDE, "projects"), "~/.claude/projects"),
@@ -142,6 +140,10 @@ FORBIDDEN_DIRS = [(ident(d), why) for d, why in [
 def forbidden(rp):
     if ident(rp) in FORBIDDEN_FILES:
         return FORBIDDEN_FILES[ident(rp)]
+    # By name where the path resolves, since Claude Code can write a new backup
+    # at any time.
+    if os.path.dirname(rp) == real(HOME) and os.path.basename(rp).startswith(".claude.json.backup"):
+        return "a backup of Claude Code's state (~/.claude.json.backup)"
     if os.path.isfile(rp) and HISTORY.match(os.path.basename(rp)):
         return "a history file"
     p = rp

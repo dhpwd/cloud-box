@@ -41,6 +41,8 @@ stub() {
 }
 
 for c in apt apt-get bun pnpm npm pre-commit journalctl scp logger; do stub "$c"; done
+printf '#!/bin/bash\n[ "$*" != "-w 60 8" ] || touch "$STUB_DIR/keys-lock-tried"\nexec /usr/bin/flock "$@"\n' >"$STUBS/flock"
+chmod +x "$STUBS/flock"
 stub ufw 'case "$1 $2" in "--force reset")
   if [ -n "${STUB_UFW_SLOW:-}" ]; then (sleep 3; echo "ufw helper wrote rules late" >>"$STUB_LOG") & wait; fi ;;
   "--force disable") exit "${STUB_UFW_DISABLE:-0}" ;;
@@ -688,7 +690,7 @@ fi
 handover_fixture
 out=$(run STUB_UID=0 STUB_PUSH_DIFF=1 bash "$REPO/scripts/06-handover.sh" 2>&1) || true
 if [[ $out == *raw.githubusercontent.com* ]] || [[ $out != *"laptop/push.sh here differs from $HEAD_SHA"* ]] ||
-  [[ $out != *"checkout HEAD -- laptop/push.sh"* ]]; then
+  [[ $out != *"show HEAD:laptop/push.sh > "* ]]; then
   bad "handover prints no laptop line when laptop/push.sh differs from the commit" "$out"
 else
   ok "handover prints no laptop line when laptop/push.sh differs from the commit"
@@ -711,25 +713,38 @@ if out=$(run STUB_UID=0 bash "$REPO/scripts/06-handover.sh" 2>&1) || [[ $out != 
 else
   ok "handover refuses when no grant is on record, before changing anything"
 fi
+handover_fixture
+printf 'agent %s' "$OP_BLOB" >"$T/state/operator-grant"
+if ! out=$(run STUB_UID=0 bash "$REPO/scripts/06-handover.sh" 2>&1); then
+  bad "handover reads a grant record whose last line has no newline" "$out"
+else
+  ok "handover reads a grant record whose last line has no newline"
+fi
 # A base run that records another grant while the handover waits for the keys
 # lock: the handover reads the record only once it holds the lock.
 handover_fixture
 mkdir -p "$T/run"
+rm -f "$T/held" "$T/release" "$T/keys-lock-tried"
 (
   exec 8>"$T/run/keys.lock"
   flock 8
   touch "$T/held"
-  sleep 1.5
-  printf 'agent %s\n' "$OTHER_BLOB" >>"$T/state/operator-grant"
+  until [ -e "$T/release" ]; do sleep 0.05; done
 ) &
 holder=$!
-for _ in $(seq 40); do
-  [ -e "$T/held" ] && break
+until [ -e "$T/held" ]; do sleep 0.05; done
+run STUB_UID=0 bash "$REPO/scripts/06-handover.sh" >"$T/ho.out" 2>&1 &
+ho=$!
+for _ in $(seq 200); do
+  [ -e "$T/keys-lock-tried" ] && break
   sleep 0.05
 done
-out=$(run STUB_UID=0 bash "$REPO/scripts/06-handover.sh" 2>&1) && rc=0 || rc=$?
+printf 'agent %s\n' "$OTHER_BLOB" >>"$T/state/operator-grant"
+touch "$T/release"
 wait "$holder" || true
-rm -f "$T/held"
+wait "$ho" && rc=0 || rc=$?
+out=$(cat "$T/ho.out")
+rm -f "$T/held" "$T/release" "$T/keys-lock-tried"
 if [ "$rc" -eq 0 ] || [[ $out != *"granted agent a key that this run's BOX_USER and OPERATOR_PUBKEY don't name"* ]]; then
   bad "handover reads the recorded grant only once it holds the keys lock" "$out"
 else
@@ -745,13 +760,21 @@ if out=$(run STUB_UID=0 CLOUD_BOX_TRUSTED_DIR="$T" bash "$T/wp/repo/scripts/06-h
 else
   ok "a root script refuses a checkout inside a directory another account can write"
 fi
-mkdir -p "$T/safe"
+# A link in a safe directory to a checkout under a writable one, and a link in
+# a writable directory to a safe checkout.
+mkdir -p "$T/safe/repo"
+cp -r "$REPO/scripts" "$T/safe/repo/"
+chmod -R go-w "$T/safe"
 ln -s "$T/wp/repo" "$T/safe/link"
-if out=$(run STUB_UID=0 CLOUD_BOX_TRUSTED_DIR="$T" bash "$T/safe/link/scripts/06-handover.sh" 2>&1) || [[ $out != *"$T/wp can be changed by an account other than root"* ]]; then
-  bad "a root script reached through a symlink checks where the checkout really lives" "$out"
-else
-  ok "a root script reached through a symlink checks where the checkout really lives"
-fi
+ln -s "$T/safe/repo" "$T/wp/link"
+for via in safe/link wp/link; do
+  if out=$(run STUB_UID=0 CLOUD_BOX_TRUSTED_DIR="$T" bash "$T/$via/scripts/06-handover.sh" 2>&1) ||
+    [[ $out != *"started through $T/$via, which reaches the checkout through a symlink"* ]]; then
+    bad "a root script refuses to run through a symlink ($via)" "$out"
+  else
+    ok "a root script refuses to run through a symlink ($via)"
+  fi
+done
 rm -rf "$T/wp" "$T/safe"
 handover_fixture
 out=$(run STUB_UID=0 STUB_ORIGIN="https://someone:SECRETTOKEN999@github.com/example-org/cloud-box.git" bash "$REPO/scripts/06-handover.sh" 2>&1) || true

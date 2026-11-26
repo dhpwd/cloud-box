@@ -8,8 +8,10 @@
 # tests/run.sh can run the scripts against a temporary directory. Nothing on a
 # box sets them.
 
-# Resolved, so the checks on it see where the checkout really lives.
+# Resolved, so the checks on it see where the checkout really lives, and the
+# path the script was started through, which require_root holds to it.
 CLOUD_BOX_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)
+CLOUD_BOX_STARTED=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -L)
 CLOUD_BOX_LIB="$CLOUD_BOX_DIR/scripts/lib.sh"
 BOX_ENV_FILE=${BOX_ENV_FILE:-$CLOUD_BOX_DIR/box.env}
 CLOUD_BOX_STATE_DIR=${CLOUD_BOX_STATE_DIR:-/etc/cloud-box}
@@ -220,7 +222,7 @@ print_push_line() {
   # assume-unchanged can't hide.
   blob=$(git -C "$CLOUD_BOX_DIR" rev-parse "$commit:laptop/push.sh" 2>/dev/null || true)
   if [ -z "$blob" ] || [ "$(git -C "$CLOUD_BOX_DIR" hash-object --no-filters laptop/push.sh 2>/dev/null)" != "$blob" ]; then
-    echo "    !! laptop/push.sh here differs from $commit, so there is no line for the laptop. Commit and push the change, or undo it with: git -C $CLOUD_BOX_DIR checkout HEAD -- laptop/push.sh"
+    echo "    !! laptop/push.sh here differs from $commit, so there is no line for the laptop. Commit and push the change, or undo it with: git -C $CLOUD_BOX_DIR show HEAD:laptop/push.sh > $CLOUD_BOX_DIR/laptop/push.sh"
     return 0
   fi
   [ "$CLOUD_BOX_DIR" = /opt/cloud-box ] || box_repo="BOX_REPO=$(printf '%q' "$CLOUD_BOX_DIR") "
@@ -240,6 +242,11 @@ in_list() {
 # it could run its own code as root.
 require_root() {
   [ "$(id -u)" -eq 0 ] || die "run this as root"
+  # Through a symlink, the path a step is started from and the checkout it
+  # reaches have different parents, and either could be swapped. A root step
+  # runs only from the resolved path, so one walk covers both.
+  [ "$CLOUD_BOX_STARTED" = "$CLOUD_BOX_DIR" ] ||
+    die "this was started through $CLOUD_BOX_STARTED, which reaches the checkout through a symlink. Run it from $CLOUD_BOX_DIR"
   local found
   found=$(find "$CLOUD_BOX_DIR" ! -type l \( ! -uid "$EUID" -o -perm /022 \) -print -quit)
   [ -z "$found" ] || die "$found can be changed by an account other than root. Fix the checkout with: chown -R root:root $CLOUD_BOX_DIR && chmod -R go-w $CLOUD_BOX_DIR"
@@ -439,7 +446,7 @@ require_recorded_grant() {
   local line want found=
   want="$BOX_USER $(key_blob "$OPERATOR_PUBKEY")"
   if [ -e "$GRANTS_FILE" ]; then
-    while IFS= read -r line; do
+    while IFS= read -r line || [ -n "$line" ]; do
       [ -n "$line" ] || continue
       [ "$line" = "$want" ] ||
         die "01-base.sh granted ${line%% *} a key that this run's BOX_USER and OPERATOR_PUBKEY don't name. Run this with the inputs 01-base.sh ran with, or remove that key by hand and its line from $GRANTS_FILE"
