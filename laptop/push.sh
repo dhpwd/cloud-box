@@ -128,6 +128,13 @@ FORBIDDEN_FILES = {
     ident(CLAUDE_JSON): "Claude Code's own state (~/.claude.json)",
     ident(os.path.join(CLAUDE, ".credentials.json")): "Claude Code's sign-in",
 }
+# Older Claude Code kept backups beside ~/.claude.json. They are found by
+# listing the home directory, so no character in its path is read as a
+# pattern, and matched by device and inode, so a link that spells the path
+# differently, or a backup that is itself a link, is still caught.
+for e in os.listdir(HOME):
+    if e.lower().startswith(".claude.json.backup"):
+        FORBIDDEN_FILES[ident(os.path.join(HOME, e))] = "a backup of Claude Code's state (~/.claude.json.backup)"
 FORBIDDEN_FILES.pop(None, None)
 FORBIDDEN_DIRS = [(ident(d), why) for d, why in [
     (os.path.join(CLAUDE, "projects"), "~/.claude/projects"),
@@ -140,10 +147,6 @@ FORBIDDEN_DIRS = [(ident(d), why) for d, why in [
 def forbidden(rp):
     if ident(rp) in FORBIDDEN_FILES:
         return FORBIDDEN_FILES[ident(rp)]
-    # By name where the path resolves, since Claude Code can write a new backup
-    # at any time.
-    if os.path.dirname(rp) == real(HOME) and os.path.basename(rp).startswith(".claude.json.backup"):
-        return "a backup of Claude Code's state (~/.claude.json.backup)"
     if os.path.isfile(rp) and HISTORY.match(os.path.basename(rp)):
         return "a history file"
     p = rp

@@ -341,6 +341,9 @@ JSON
   ln -s "$h/.claude/backups/.claude.json.backup.1" "$h/.claude/skills/good/backup"
   echo "{\"mcpServers\": {\"x\": {\"headers\": {\"K\": \"$SENTINEL\"}}}}" >"$h/.claude.json.backup"
   ln -s "$h/.claude.json.backup" "$h/.claude/skills/good/oldbackup"
+  echo "{\"mcpServers\": {\"x\": {\"headers\": {\"K\": \"$SENTINEL\"}}}}" >"$T/elsewhere/kept-backup"
+  ln -s "$T/elsewhere/kept-backup" "$h/.claude.json.backup.2"
+  ln -s "$T/elsewhere/kept-backup" "$h/.claude/skills/good/keptlink"
   echo "module.exports = 1" >"$h/.claude/skills/good/node_modules/dep/index.js"
   echo "$SENTINEL commands" >"$T/elsewhere/fish_history"
   ln -s "$T/elsewhere/fish_history" "$h/.claude/skills/good/fishlink"
@@ -400,6 +403,8 @@ elif grep -qx 'skills/good/backup' <<<"$members" || [[ $out != *"skills/good/bac
   bad "push.sh drops and names a link into ~/.claude/backups" "$out"
 elif grep -qx 'skills/good/oldbackup' <<<"$members" || [[ $out != *"skills/good/oldbackup: points into a backup of Claude Code's state"* ]]; then
   bad "push.sh drops and names a link to a ~/.claude.json backup beside it" "$out"
+elif grep -qx 'skills/good/keptlink' <<<"$members" || [[ $out != *"skills/good/keptlink: points into a backup of Claude Code's state"* ]]; then
+  bad "push.sh drops a link to the file a ~/.claude.json backup links to" "$out"
 elif grep -q 'skills/good/node_modules' <<<"$members" || [[ $out != *"skills/good/node_modules: not copied: install or clone it on the box"* ]]; then
   bad "push.sh leaves out a skill's node_modules and names it" "$out"
 elif grep -qx 'skills/good/fishlink' <<<"$members"; then
@@ -690,7 +695,7 @@ fi
 handover_fixture
 out=$(run STUB_UID=0 STUB_PUSH_DIFF=1 bash "$REPO/scripts/06-handover.sh" 2>&1) || true
 if [[ $out == *raw.githubusercontent.com* ]] || [[ $out != *"laptop/push.sh here differs from $HEAD_SHA"* ]] ||
-  [[ $out != *"show HEAD:laptop/push.sh > "* ]]; then
+  [[ $out != *"show HEAD:laptop/push.sh > "*"/laptop/push.sh.new && mv "* ]]; then
   bad "handover prints no laptop line when laptop/push.sh differs from the commit" "$out"
 else
   ok "handover prints no laptop line when laptop/push.sh differs from the commit"
@@ -729,14 +734,14 @@ rm -f "$T/held" "$T/release" "$T/keys-lock-tried"
   exec 8>"$T/run/keys.lock"
   flock 8
   touch "$T/held"
-  until [ -e "$T/release" ]; do sleep 0.05; done
+  for _ in $(seq 400); do [ -e "$T/release" ] && break; sleep 0.05; done
 ) &
 holder=$!
-until [ -e "$T/held" ]; do sleep 0.05; done
+for _ in $(seq 200); do [ -e "$T/held" ] && break; sleep 0.05; done
 run STUB_UID=0 bash "$REPO/scripts/06-handover.sh" >"$T/ho.out" 2>&1 &
 ho=$!
 for _ in $(seq 200); do
-  [ -e "$T/keys-lock-tried" ] && break
+  [ -e "$T/keys-lock-tried" ] && { lock_tried=1; break; }
   sleep 0.05
 done
 printf 'agent %s\n' "$OTHER_BLOB" >>"$T/state/operator-grant"
@@ -745,7 +750,7 @@ wait "$holder" || true
 wait "$ho" && rc=0 || rc=$?
 out=$(cat "$T/ho.out")
 rm -f "$T/held" "$T/release" "$T/keys-lock-tried"
-if [ "$rc" -eq 0 ] || [[ $out != *"granted agent a key that this run's BOX_USER and OPERATOR_PUBKEY don't name"* ]]; then
+if [ -z "${lock_tried:-}" ] || [ "$rc" -eq 0 ] || [[ $out != *"granted agent a key that this run's BOX_USER and OPERATOR_PUBKEY don't name"* ]]; then
   bad "handover reads the recorded grant only once it holds the keys lock" "$out"
 else
   ok "handover reads the recorded grant only once it holds the keys lock"
@@ -776,6 +781,18 @@ for via in safe/link wp/link; do
   fi
 done
 rm -rf "$T/wp" "$T/safe"
+handover_fixture
+mkdir -p "$T/ls/repo"
+cp -r "$REPO/scripts" "$T/ls/real-scripts"
+chmod -R go-w "$T/ls"
+ln -s ../real-scripts "$T/ls/repo/scripts"
+if out=$(run STUB_UID=0 CLOUD_BOX_TRUSTED_DIR="$T" bash "$T/ls/repo/scripts/06-handover.sh" 2>&1) ||
+  [[ $out != *"$T/ls/repo/scripts can be changed by an account other than root"* ]]; then
+  bad "a root script refuses a checkout holding a symlink" "$out"
+else
+  ok "a root script refuses a checkout holding a symlink"
+fi
+rm -rf "$T/ls"
 handover_fixture
 out=$(run STUB_UID=0 STUB_ORIGIN="https://someone:SECRETTOKEN999@github.com/example-org/cloud-box.git" bash "$REPO/scripts/06-handover.sh" 2>&1) || true
 if [[ $out == *SECRETTOKEN999* ]] || [[ $out != *"isn't a github.com URL this can read"* ]]; then
