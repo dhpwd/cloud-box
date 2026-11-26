@@ -4,7 +4,7 @@
 
 The scripts I run to set up a cloud box for someone, and the do-it-yourself route for anyone who wants to build their own. Run on a fresh Debian 13 server with the inputs file filled in and no script edited, they produce a box whose Claude Code sessions you start and continue from the Claude desktop and phone apps through Remote Control. Your repos, your Claude Code config and the key-based connectors you choose are on it, the agents run as an account without admin rights, and nothing on the box is open to the internet except through Tailscale.
 
-The owner never needs a terminal once the box is built. The why behind the setup is in the blog post: [Running coding agents on a €30 Linux box](https://danhopwood.com/posts/running-coding-agents-on-a-30-euro-linux-box).
+The owner never needs a terminal once the box is built. The why behind the setup is in the blog post: [Running AI agents on a €30 Linux box](https://danhopwood.com/posts/running-ai-agents-on-a-30-euro-linux-box).
 
 ## Two roles
 
