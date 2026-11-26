@@ -190,7 +190,7 @@ It installs a systemd user unit, `claude-rc@<repo>.service`, for each repo in `R
 /opt/cloud-box/scripts/02-tailscale-lockdown.sh close
 ```
 
-It binds sshd to the Tailscale address, turns off root login and passwords for sshd, allows only `BOX_USER`, and sets the firewall to accept nothing from outside the tailnet. Before it changes anything it arms a revert: unless a second prompt confirms a fresh connection worked, the whole change is undone after 300 seconds. When it asks, the owner opens a new connection from their laptop (`ssh <box user>@<box name>`), and the operator answers `yes` only once that has worked. If the 300 seconds run out first, the revert stops the close, mid-step or at the prompt, and reopens public SSH: run the close again.
+It binds sshd to the Tailscale address, turns off root login and passwords for sshd, allows only `BOX_USER`, and sets the firewall to accept nothing from outside the tailnet. Before it changes anything it arms a revert: unless a second prompt confirms a fresh connection worked, the whole change is undone after 300 seconds. When it asks, the owner opens a new connection from their laptop (`ssh -S none <box user>@<box name>`, where `-S none` keeps SSH from reusing a connection it already has open), and the operator answers `yes` only once that has worked. If the 300 seconds run out first, the revert stops the close, mid-step or at the prompt, and reopens public SSH: run the close again.
 
 ### 10. Handover (operator, root)
 

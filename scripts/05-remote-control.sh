@@ -123,8 +123,8 @@ while read -r u _; do
   r=${u#claude-rc@}
   r=${r%.service}
   in_list "$r" "${RC_DIRS[@]}" ||
-    echo "    note: claude-rc@$r is running but not in RC_REPOS. To stop it: systemctl --user disable --now claude-rc@$r"
-done < <(systemctl --user list-units 'claude-rc@*' --plain --no-legend --state=active 2>/dev/null)
+    echo "    note: claude-rc@$r is set up but not in RC_REPOS, and an enabled one starts again at boot. To remove it: systemctl --user disable --now claude-rc@$r"
+done < <(systemctl --user list-units 'claude-rc@*' --all --plain --no-legend 2>/dev/null)
 
 if [ -n "$started" ]; then
   echo "==> Waiting 20s, then checking the servers stayed up"

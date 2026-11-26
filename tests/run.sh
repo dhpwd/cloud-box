@@ -65,7 +65,15 @@ stub ip6tables 'echo "-P INPUT DROP"'
 stub id 'case $1 in -u) echo "${STUB_UID:-1000}" ;; -un) echo "${STUB_USER:-agent}" ;; *) exec /usr/bin/id "$@" ;; esac'
 stub runuser 'while [ "$1" != -- ]; do shift; done; shift; exec "$@"'
 stub loginctl 'echo "${STUB_LINGER:-yes}"'
-stub systemctl 'case $* in *is-active*) [ "${STUB_ACTIVE:-no}" = yes ] ;; *show*) echo 4242 ;; esac'
+stub systemctl 'case $* in
+  *is-active*) [ "${STUB_ACTIVE:-no}" = yes ] ;;
+  *show*) echo 4242 ;;
+  *list-units*)
+    for e in ${STUB_RC_UNITS:-}; do
+      case " $* " in *" --all "*) ;; *) [ "${e#*:}" = active ] || continue ;; esac
+      echo "${e%%:*} loaded ${e#*:}"
+    done ;;
+esac'
 stub ps 'case " $* " in *" -ww "*) printf "%s\n" "${STUB_PS_ARGS:-}" ;; *) printf "%s\n" "${STUB_PS_ARGS:0:40}" ;; esac'
 # Real git for everything but pull, which would reach a network or, from an
 # empty .git, a repository above the temporary directory.
@@ -73,6 +81,7 @@ stub git 'case " $* " in
   *" pull "*) exit "${STUB_GIT_PULL:-0}" ;;
   *" remote get-url origin "*) echo "${STUB_ORIGIN:-https://github.com/example-org/cloud-box.git}"; exit 0 ;;
   *" status --porcelain "*) exit 0 ;;
+  *" diff --quiet HEAD -- laptop/push.sh "*) exit "${STUB_PUSH_DIFF:-0}" ;;
 esac
 exec /usr/bin/git "$@"'
 stub tailscale 'case $1 in ip) echo 100.64.0.1 ;; status) echo "{\"Self\":{\"DNSName\":\"box.example.ts.net.\"}}" ;; esac'
@@ -94,6 +103,7 @@ case "$1 $2" in
   "mcp add-json") [ ! -f "$reg/$5" ] || exit 1; cat >"$reg/$5" ;;
   "mcp remove") rm -f "$reg/$5" ;;
   "mcp list")
+    [ -z "${STUB_MCP_LIST_FAIL:-}" ] || exit 1
     echo "Checking MCP server health..."
     for f in "$reg"/*; do
       [ -f "$f" ] || continue
@@ -244,6 +254,14 @@ if [[ $out != *"app: running, unchanged"* ]] || grep -q 'restart' "$LOG" || [ "$
 else
   ok "05-remote-control.sh leaves an unchanged server and its settings file alone"
 fi
+out=$(run REPOS="app=org/app" RC_REPOS="app:writer" STUB_ACTIVE=yes STUB_RC_UNITS="claude-rc@old.service:inactive" \
+  STUB_PS_ARGS="claude remote-control --spawn same-dir --name app --settings $rc/app.json" \
+  bash "$REPO/scripts/05-remote-control.sh" 2>&1) || true
+if [[ $out != *"claude-rc@old is set up but not in RC_REPOS"* ]]; then
+  bad "05-remote-control.sh names a stopped server that isn't in RC_REPOS" "$out"
+else
+  ok "05-remote-control.sh names a stopped server that isn't in RC_REPOS"
+fi
 
 # ---- 03-repos.sh --clone-only ------------------------------------------------
 
@@ -303,6 +321,10 @@ JSON
   mkdir -p "$h/.ssh"
   echo "$SENTINEL private key" >"$h/.ssh/id_test"
   ln "$h/.ssh/id_test" "$h/.claude/skills/good/sshlink"
+  mkdir -p "$h/.claude/backups" "$h/.claude/skills/good/node_modules/dep"
+  echo "{\"mcpServers\": {\"x\": {\"headers\": {\"K\": \"$SENTINEL\"}}}}" >"$h/.claude/backups/.claude.json.backup.1"
+  ln -s "$h/.claude/backups/.claude.json.backup.1" "$h/.claude/skills/good/backup"
+  echo "module.exports = 1" >"$h/.claude/skills/good/node_modules/dep/index.js"
   echo "$SENTINEL commands" >"$T/elsewhere/fish_history"
   ln -s "$T/elsewhere/fish_history" "$h/.claude/skills/good/fishlink"
   mkdir -p "$h/.claude/skills/git-history"
@@ -357,6 +379,10 @@ elif [[ $out != *"skills/good/leak"* ]]; then
   bad "push.sh names the dropped link" "$out"
 elif grep -qx 'skills/good/sshlink' <<<"$members" || [[ $out != *"skills/good/sshlink: has other hard links"* ]]; then
   bad "push.sh drops and names a hard link to a file in ~/.ssh" "$members"
+elif grep -qx 'skills/good/backup' <<<"$members" || [[ $out != *"skills/good/backup: points into ~/.claude/backups"* ]]; then
+  bad "push.sh drops and names a link into ~/.claude/backups" "$out"
+elif grep -q 'skills/good/node_modules' <<<"$members" || [[ $out != *"skills/good/node_modules: not copied: install or clone it on the box"* ]]; then
+  bad "push.sh leaves out a skill's node_modules and names it" "$out"
 elif grep -qx 'skills/good/fishlink' <<<"$members"; then
   bad "push.sh drops a link to a shell history file" "$members"
 elif grep -q "$SENTINEL" "$T/ssh/$c.in"; then
@@ -548,6 +574,14 @@ else
   ok "04-connectors.sh skips a malformed definition without printing it"
 fi
 
+fresh_home
+out=$(printf '{}' | run STUB_MCP_LIST_FAIL=1 bash "$REPO/scripts/04-connectors.sh" 2>&1) && rc=0 || rc=$?
+if [ "$rc" -eq 0 ] || [[ $out != *"claude mcp list ended with an error"* ]]; then
+  bad "04-connectors.sh reports a status list it couldn't read" "$out"
+else
+  ok "04-connectors.sh reports a status list it couldn't read"
+fi
+
 # ---- keys: base and handover -------------------------------------------------
 
 grant() { run bash -c '. "$1" && read_inputs && grant_operator_key' _ "$REPO/scripts/lib.sh" 2>&1; }
@@ -560,8 +594,10 @@ if [ "$(grep -c -F "$OP_BLOB" "$T/keys/user_ak")" != 1 ]; then
   bad "base adds the operator's key exactly once over two runs" "$out"$'\n'"$out2"$'\n'"$(cat "$T/keys/user_ak")"
 elif ! grep -qF "$OTHERKEY" "$T/keys/user_ak"; then
   bad "base leaves an unrelated key in place" "$(cat "$T/keys/user_ak")"
+elif [ "$(cat "$T/state/operator-grant" 2>/dev/null)" != "agent $OP_BLOB" ]; then
+  bad "base records the account and key it granted, once" "$(cat "$T/state/operator-grant" 2>&1)"
 else
-  ok "base adds the operator's key once and leaves an unrelated key"
+  ok "base adds the operator's key once, leaves an unrelated key and records the grant"
 fi
 printf '# %s\n%s\n' "$OPKEY" "$OTHERKEY" >"$T/keys/user_ak"
 out=$(grant)
@@ -631,6 +667,34 @@ if [[ $out == *"raw.githubusercontent.com/example-org/cloud-box/$HEAD_SHA/laptop
 else
   bad "handover prints the laptop's push.sh line at the checkout's commit, with the checkout's path" "$out"
 fi
+handover_fixture
+out=$(run STUB_UID=0 STUB_PUSH_DIFF=1 bash "$REPO/scripts/06-handover.sh" 2>&1) || true
+if [[ $out == *raw.githubusercontent.com* ]] || [[ $out != *"laptop/push.sh here differs from $HEAD_SHA"* ]]; then
+  bad "handover prints no laptop line when laptop/push.sh differs from the commit" "$out"
+else
+  ok "handover prints no laptop line when laptop/push.sh differs from the commit"
+fi
+handover_fixture
+printf 'agent %s\n' "$OTHER_BLOB" >"$T/state/operator-grant"
+if out=$(run STUB_UID=0 bash "$REPO/scripts/06-handover.sh" 2>&1); then
+  bad "handover refuses inputs that don't name the key the base granted: exited 0" "$out"
+elif [[ $out != *"granted agent a key that this run's BOX_USER and OPERATOR_PUBKEY don't name"* ]] ||
+  [ -e "$T/state/handed-over" ] || ! grep -qF "$OP_BLOB" "$T/keys/root_ak"; then
+  bad "handover refuses inputs that don't name the key the base granted, before changing anything" "$out"
+else
+  ok "handover refuses inputs that don't name the key the base granted, before changing anything"
+fi
+handover_fixture
+mkdir -p "$T/wp/repo"
+cp -r "$REPO/scripts" "$T/wp/repo/"
+chmod -R go-w "$T/wp/repo"
+chmod 775 "$T/wp"
+if out=$(run STUB_UID=0 bash "$T/wp/repo/scripts/06-handover.sh" 2>&1) || [[ $out != *"$T/wp can be changed by an account other than root"* ]]; then
+  bad "a root script refuses a checkout inside a directory another account can write" "$out"
+else
+  ok "a root script refuses a checkout inside a directory another account can write"
+fi
+rm -rf "$T/wp"
 handover_fixture
 out=$(run STUB_UID=0 STUB_ORIGIN="https://someone:SECRETTOKEN999@github.com/example-org/cloud-box.git" bash "$REPO/scripts/06-handover.sh" 2>&1) || true
 if [[ $out == *SECRETTOKEN999* ]] || [[ $out != *"isn't a github.com URL this can read"* ]]; then
@@ -758,7 +822,9 @@ revert_ran() {
     sleep 0.25
   done
 }
-out=$({ echo yes; revert_ran; echo yes; } | run STUB_UID=0 REVERT_AFTER=1 bash "$REPO/scripts/02-tailscale-lockdown.sh" close 2>&1) && rc=0 || rc=$?
+# The close's own status, not the pipeline's: the answer writer can fail too.
+out=$({ echo yes; revert_ran; echo yes; } | { run STUB_UID=0 REVERT_AFTER=1 bash "$REPO/scripts/02-tailscale-lockdown.sh" close 2>&1; echo $? >"$T/close.rc"; }) || true
+rc=$(cat "$T/close.rc")
 wait_lock_free || true
 if [ "$rc" -eq 0 ]; then
   bad "a yes after the revert has fired exits non-zero" "$out"
@@ -788,7 +854,8 @@ expect_refusal "a handover while a revert is armed refuses" "still armed" STUB_U
 wait_lock_free || bad "the armed revert released its lock after running"
 
 close_fixture
-out=$({ echo yes; sleep 5; } | run STUB_UID=0 STUB_UFW_SLOW=1 REVERT_AFTER=1 bash "$REPO/scripts/02-tailscale-lockdown.sh" close 2>&1) && rc=0 || rc=$?
+out=$({ echo yes; sleep 5; } | { run STUB_UID=0 STUB_UFW_SLOW=1 REVERT_AFTER=1 bash "$REPO/scripts/02-tailscale-lockdown.sh" close 2>&1; echo $? >"$T/close.rc"; }) || true
+rc=$(cat "$T/close.rc")
 wait_lock_free || true
 after_revert=$(sed -n '/^ufw --force disable/,$p' "$LOG" | grep -c '^ufw' || true)
 if [ "$rc" -eq 0 ] || [[ $out != *"Public SSH is open again"* ]]; then
@@ -877,6 +944,8 @@ printf '%s\n%s\n' "$OPKEY" "$OTHERKEY" >"$T/keys/user_ak"
 out=$({ echo yes; echo yes; } | run STUB_UID=0 REVERT_AFTER=20 bash "$REPO/scripts/02-tailscale-lockdown.sh" close 2>&1) && rc=0 || rc=$?
 if [ "$rc" -ne 0 ] || [ ! -e "$T/state/closed" ]; then
   bad "a timely yes confirms the close and writes the marker" "$out"
+elif [[ $out != *"ssh -S none agent@"* ]]; then
+  bad "the close asks for a connection that can't reuse an open one" "$out"
 elif ! out2=$(run STUB_UID=0 bash "$REPO/scripts/06-handover.sh" 2>&1); then
   bad "a handover straight after a confirmed close is not refused" "$out2"
 else

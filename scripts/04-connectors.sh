@@ -106,6 +106,8 @@ done
 echo
 echo "==> Status"
 needs_login=()
+list_rc=0
+list=$(claude mcp list 2>/dev/null) || list_rc=$?
 while IFS= read -r line; do
   case $line in *": "*" - "*) ;; *) continue ;; esac
   n=${line%%: *}
@@ -121,7 +123,11 @@ while IFS= read -r line; do
     echo "    $n: $s"
     [ "$s" != "needs sign-in" ] || needs_login+=("$n")
   fi
-done < <(claude mcp list 2>/dev/null || true)
+done <<<"$list"
+if [ "$list_rc" -ne 0 ]; then
+  echo "    !! claude mcp list ended with an error, so the statuses above may be incomplete"
+  attention=1
+fi
 
 if [ ${#needs_login[@]} -gt 0 ]; then
   echo

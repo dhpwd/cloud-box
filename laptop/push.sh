@@ -133,6 +133,7 @@ FORBIDDEN_DIRS = [(ident(d), why) for d, why in [
     (os.path.join(CLAUDE, "projects"), "~/.claude/projects"),
     (os.path.join(CLAUDE, "plugins"), "~/.claude/plugins"),
     (os.path.join(HOME, ".ssh"), "~/.ssh"),
+    (os.path.join(CLAUDE, "backups"), "~/.claude/backups"),
 ] + [(os.path.join(CLAUDE, e), "the excluded ~/.claude/" + e) for e in excludes] if ident(d)]
 
 
@@ -176,7 +177,9 @@ def collect():
                 dropped.append((name, "a symlink loop"))
                 return
             for entry in sorted(os.listdir(lp)):
-                if entry not in SKIP:
+                if entry in ("node_modules", ".git"):
+                    dropped.append((name + "/" + entry, "not copied: install or clone it on the box"))
+                elif entry not in SKIP:
                     add(os.path.join(lp, entry), name + "/" + entry, stack | {rp})
         elif os.path.isfile(lp):
             st = os.stat(rp)

@@ -21,6 +21,8 @@ HANDED_OVER_MARKER="$CLOUD_BOX_STATE_DIR/handed-over"
 # shellcheck disable=SC2034 # read by the scripts that source this
 CLOSED_MARKER="$CLOUD_BOX_STATE_DIR/closed"
 CLOSE_LOCK="$CLOUD_BOX_RUN_DIR/close.lock"
+KEYS_LOCK="$CLOUD_BOX_RUN_DIR/keys.lock"
+GRANTS_FILE="$CLOUD_BOX_STATE_DIR/operator-grant"
 
 INPUT_NAMES="BOX_USER OPERATOR_PUBKEY REPOS RC_REPOS RC_SPAWN RC_CAPACITY"
 
@@ -213,8 +215,10 @@ print_push_line() {
     echo "    !! this checkout's origin isn't a github.com URL this can read, so there is no URL for the laptop. Push this commit to GitHub first"
     return 0
   fi
-  [ -z "$(git -C "$CLOUD_BOX_DIR" status --porcelain --untracked-files=no)" ] ||
-    echo "    !! this checkout has local changes, so the laptop's copy of push.sh may not match what the box runs"
+  if ! git -C "$CLOUD_BOX_DIR" diff --quiet HEAD -- laptop/push.sh 2>/dev/null; then
+    echo "    !! laptop/push.sh here differs from $commit, so there is no line for the laptop. Commit and push the change, or undo it with: git -C $CLOUD_BOX_DIR checkout -- laptop/push.sh"
+    return 0
+  fi
   [ "$CLOUD_BOX_DIR" = /opt/cloud-box ] || box_repo="BOX_REPO=$(printf '%q' "$CLOUD_BOX_DIR") "
   echo "    This checkout is at $commit. On the owner's laptop, step 5 of the README runs:"
   printf '      ( d=$(mktemp -d) || exit 1; trap %s EXIT; curl -fsSL -o "$d/push.sh" https://raw.githubusercontent.com/%s/%s/laptop/push.sh && %s/bin/bash "$d/push.sh" %s@<box name> --connectors <name,name> )\n' \
@@ -235,6 +239,14 @@ require_root() {
   local found
   found=$(find "$CLOUD_BOX_DIR" ! -type l \( ! -uid "$EUID" -o -perm /022 \) -print -quit)
   [ -z "$found" ] || die "$found can be changed by an account other than root. Fix the checkout with: chown -R root:root $CLOUD_BOX_DIR && chmod -R go-w $CLOUD_BOX_DIR"
+  # A directory above the checkout that another account can write lets it swap
+  # the checkout for its own.
+  local d=$CLOUD_BOX_DIR
+  while [ "$d" != / ]; do
+    d=$(dirname "$d")
+    found=$(find "$d" -maxdepth 0 \( ! -uid 0 ! -uid "$EUID" -o -perm /022 \) -print)
+    [ -z "$found" ] || die "$d can be changed by an account other than root, so the checkout inside it could be replaced. Put the checkout at /opt/cloud-box"
+  done
 }
 
 require_box_user() {
@@ -385,14 +397,46 @@ key_fingerprints() {
   printf '%s\n' "$out" | awk '{ print "      " $2 }'
 }
 
+# Held while the base checks the marker and adds the key, and while the
+# handover marks the box and removes the key, so no grant lands after a
+# handover.
+take_keys_lock() {
+  mkdir -p "$CLOUD_BOX_RUN_DIR"
+  exec 8>"$KEYS_LOCK"
+  flock -w 60 8 || die "another 01-base.sh or 06-handover.sh is changing the operator's key. Let it finish, then run this again"
+}
+
+# The handover removes the key the base granted, so the grant is recorded
+# where only root can change it.
 grant_operator_key() {
-  local file
+  local file line
   file=$(user_authorized_keys)
+  take_keys_lock
   if [ -e "$HANDED_OVER_MARKER" ]; then
     echo "    $HANDED_OVER_MARKER exists: this box has been handed over, so the operator's key is not added again"
+    exec 8>&-
     return
   fi
-  as_box_user_lib add_key "$file" "$OPERATOR_PUBKEY"
+  line="$BOX_USER $(key_blob "$OPERATOR_PUBKEY")"
+  mkdir -p "$CLOUD_BOX_STATE_DIR"
+  grep -qxF "$line" "$GRANTS_FILE" 2>/dev/null || printf '%s\n' "$line" >>"$GRANTS_FILE"
+  local rc=0
+  as_box_user_lib add_key "$file" "$OPERATOR_PUBKEY" || rc=$?
+  exec 8>&-
+  return "$rc"
+}
+
+# Refuses a handover whose inputs name another account or key than the ones
+# the base granted, which it would otherwise report removed while the granted
+# key stays.
+require_recorded_grant() {
+  local line want
+  [ -e "$GRANTS_FILE" ] || return 0
+  want="$BOX_USER $(key_blob "$OPERATOR_PUBKEY")"
+  while IFS= read -r line; do
+    [ -z "$line" ] || [ "$line" = "$want" ] ||
+      die "01-base.sh granted ${line%% *} a key that this run's BOX_USER and OPERATOR_PUBKEY don't name. Run this with the inputs 01-base.sh ran with, or remove that key by hand and its line from $GRANTS_FILE"
+  done <"$GRANTS_FILE"
 }
 
 revoke_operator_key() {

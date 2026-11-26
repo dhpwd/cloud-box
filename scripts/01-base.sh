@@ -54,6 +54,15 @@ if ! id "$BOX_USER" >/dev/null 2>&1; then
 fi
 privileged=$(id -nG "$BOX_USER" | tr ' ' '\n' | grep -xE 'sudo|wheel|root|disk|docker|lxd|incus|incus-admin|shadow|staff' | tr '\n' ' ' || true)
 [ -z "$privileged" ] || die "$BOX_USER is in: ${privileged% }. The agents run as this account, so it must have no admin rights. Remove each with: gpasswd -d $BOX_USER <group>, or choose another BOX_USER. Then run this again"
+# An account that already existed may have a password, or sudo rights granted
+# outside the groups above.
+case $(getent shadow "$BOX_USER" | cut -d: -f2) in
+  '!'* | '*'*) ;;
+  *) die "$BOX_USER has a password, or an empty one. The agents run as this account, so lock it with: passwd -l $BOX_USER. Then run this again" ;;
+esac
+if command -v sudo >/dev/null && ! LC_ALL=C sudo -n -l -U "$BOX_USER" 2>&1 | grep -q 'is not allowed to run sudo'; then
+  die "$BOX_USER can run sudo (sudo -l -U $BOX_USER lists what). The agents run as this account, so remove its rules from /etc/sudoers and /etc/sudoers.d, or choose another BOX_USER. Then run this again"
+fi
 
 echo "==> Operator's key for $BOX_USER"
 # A real SSH sign-in as the box user is how the operator gets a working

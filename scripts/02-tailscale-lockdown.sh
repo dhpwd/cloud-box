@@ -102,8 +102,9 @@ CONF
   ufw status verbose
 
   echo
-  echo "==> From the owner's laptop, open a NEW connection and confirm it works:"
-  echo "     ssh $BOX_USER@$TS_NAME"
+  echo "==> From the owner's laptop, open a NEW connection and confirm it works."
+  echo "    -S none keeps SSH from reusing a connection it already has open:"
+  echo "     ssh -S none $BOX_USER@$TS_NAME"
   echo
   read -rp "Did that new connection succeed? [yes/NO] " ok2
   if [ "$ok2" != "yes" ]; then
