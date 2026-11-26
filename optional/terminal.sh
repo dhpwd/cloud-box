@@ -1,9 +1,42 @@
 #!/usr/bin/env bash
-# Step 5 – tmux, project sessions, kill switch. Runs as the box user.
+# Optional – the terminal route: mosh, tmux with a session per repo, a kill
+# switch and the shell helpers. Not part of a standard setup. Two parts, each
+# run from this checkout:
+#   as root:          optional/terminal.sh   # packages, and tmux 3.7 from source
+#   as the box user:  optional/terminal.sh   # tmux config, sessions, helpers
 set -euo pipefail
+# shellcheck source=scripts/lib.sh
+. "$(dirname "$0")/../scripts/lib.sh"
+read_inputs
+
+if [ "$(id -u)" -eq 0 ]; then
+  require_root
+  export DEBIAN_FRONTEND=noninteractive
+  echo "==> Packages"
+  apt-get update
+  apt-get install -y mosh fd-find fzf bat glow micro starship xvfb xclip \
+                     build-essential pkg-config libevent-dev libncurses-dev bison autoconf automake
+
+  echo "==> tmux 3.7 from source"
+  # Debian 13 ships 3.5a. Synchronised output (DECSET 2026) landed in 3.7, and without
+  # it Claude Code's TUI flickers. apt's tmux is removed to avoid two on PATH.
+  apt-get remove -y tmux || true
+  TMUX_VER=3.7
+  if [ ! -x /usr/local/bin/tmux ]; then
+    tmpd=$(mktemp -d)
+    curl -fsSL "https://github.com/tmux/tmux/releases/download/${TMUX_VER}/tmux-${TMUX_VER}.tar.gz" \
+      | tar -xz -C "$tmpd"
+    ( cd "$tmpd/tmux-${TMUX_VER}" && ./configure && make -j"$(nproc)" && make install )
+    rm -rf "$tmpd"
+  fi
+  /usr/local/bin/tmux -V
+  echo "==> Done. Now run this script again as $BOX_USER"
+  exit 0
+fi
+require_box_user
 
 # Synchronised output (DECSET 2026) landed in tmux 3.7. Without it Claude Code's
-# TUI flickers. 01-base.sh builds 3.7 from source because Debian 13 ships 3.5a.
+# TUI flickers. The root part builds 3.7 from source because Debian 13 ships 3.5a.
 V=$(tmux -V | grep -oE '[0-9]+\.[0-9]+')
 awk -v v="$V" 'BEGIN{ if (v+0 < 3.7) print "WARNING: tmux " v " < 3.7 – no synchronised output, the TUI will flicker" }'
 
@@ -36,15 +69,15 @@ bind | split-window -h -c "#{pane_current_path}"
 CONF
 
 # One session per project, named after the directory with dots swapped for
-# dashes so fidero.js and fidero.com do not collide on a bare "fidero".
-#   mosh dan@<magicdns-name> -- tmux attach -t fidero-os
+# dashes so example.js and example.com do not collide on a bare "example".
+#   mosh <user>@<magicdns-name> -- tmux attach -t <repo>
 # One session per project, plus a general one at ~/Workspace for dispatching
 # background jobs and reading `claude agents`. That does not need tmux for
 # persistence – the supervisor outlives the connection – but mosh has no
 # scrollback, so tmux's copy mode is the only way to read back what happened.
 tmux new-session -d -s agents -c "$HOME/Workspace" 2>/dev/null || true
-# The projects that get a session at build time – edit to taste.
-for p in fidero-os fidero-engine fidero.js fidero.com cli-agents; do
+# The projects that get a session at build time: every repo in REPOS.
+for p in "${REPO_DIRS[@]}"; do
   d="$HOME/Workspace/$p"
   [ -d "$d" ] || continue
   tmux new-session -d -s "${p//./-}" -c "$d" 2>/dev/null || true
@@ -56,8 +89,8 @@ tmux ls || true
 # stands in as a clipboard holder: boximg on the laptop pushes the Mac's
 # clipboard image into it over ssh, and the claude wrapper in ~/.bash_aliases
 # points DISPLAY at it – only there, so micro's clipboard and Playwright keep
-# behaving as they do now. Comes back at boot once 06-supervisor.sh has enabled
-# lingering. xvfb and xclip are installed by 01-base.sh.
+# behaving as they do now. Comes back at boot because 01-base.sh enables
+# lingering. xvfb and xclip are installed by this script's root part.
 mkdir -p "$HOME/.config/systemd/user"
 cat > "$HOME/.config/systemd/user/xvfb-clipboard.service" <<'UNIT'
 [Unit]
@@ -147,15 +180,6 @@ t() {
   fi
 }
 
-# Agent launchers for my custom agents, matching the laptop. Yours will differ.
-alias emma="claude --agent emma"
-alias toby="claude --agent toby"
-alias mia="claude --agent mia"
-
-# ben is vault-scoped (fidero-os/.claude/agents), so it only resolves from there.
-# The subshell leaves the caller's working directory alone.
-ben() { (cd ~/Workspace/fidero-os && claude --agent ben "$@"); }
-
 # Stops every agent process without touching the tmux sessions.
 alias killagents="pkill -u $USER -f 'claude|codex|gemini'"
 
@@ -163,9 +187,8 @@ alias killagents="pkill -u $USER -f 'claude|codex|gemini'"
 # client's value into the session environment (update-environment), but that
 # only reaches panes created after the attach – a shell already running keeps
 # whatever it started with. Pull it from the session at launch so a claude
-# started from any pane follows the most recent attach. The agent aliases
-# above go through this too. The case guard keeps the ~/.profile default when
-# the session holds no value at all.
+# started from any pane follows the most recent attach. The case guard keeps
+# the ~/.profile default when the session holds no value at all.
 # DISPLAY points Ctrl-V's xclip at the Xvfb clipboard holder (see the unit
 # above). Set here rather than in ~/.profile so nothing else picks it up.
 claude() {
@@ -255,7 +278,7 @@ fp() {
 alias ff='fdfind'
 
 # starship: branch, dirty count and ahead/behind in the prompt of every pane.
-# Config is ~/.config/starship.toml, symlinked into cli-agents by install.sh.
+# Config is ~/.config/starship.toml: symlink this repo's shell/starship.toml there.
 command -v starship >/dev/null && eval "$(starship init bash)"
 CONF
 
