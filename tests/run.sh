@@ -452,7 +452,9 @@ ob_fixture() {
   mkdir -p "$T/ob/links" "$T/home/.config/obsidian-headless"
   echo "$OB_PIN" >"$T/ob/version"
   printf '%s' "$OB_TOKEN" >"$T/home/.config/obsidian-headless/auth_token"
+  touch -d 2020-01-01 "$T/home/.config/obsidian-headless/auth_token"
 }
+OB_SIGNED_IN_AT=$(date -d 2020-01-01 +%s)
 # Two vaults, one named and one given by ID, and the owner's encryption
 # password ready on standard input for each sync-setup.
 obsync() {
@@ -501,8 +503,9 @@ expect_ob_stop "obsidian-sync.sh stops when Obsidian is signed out, naming ob lo
   "Obsidian is not signed in on this box. Owner's step: run ob login" --
 ob_fixture
 rm "$T/home/.config/obsidian-headless/auth_token"
-expect_ob_stop "obsidian-sync.sh checks the stored sign-in the units use, not OBSIDIAN_AUTH_TOKEN" \
-  "Obsidian is not signed in on this box" -- OBSIDIAN_AUTH_TOKEN=from-the-session
+expect_ob_stop "obsidian-sync.sh checks the stored sign-in the units use, not OBSIDIAN_AUTH_TOKEN, and says to unset it" \
+  "Obsidian is not signed in on this box" "OBSIDIAN_AUTH_TOKEN is set in this session" "Unset it first" \
+  -- OBSIDIAN_AUTH_TOKEN=from-the-session
 ob_fixture
 expect_ob_stop "obsidian-sync.sh stops when Obsidian refuses the stored sign-in, naming ob logout and ob login" \
   "Obsidian refused the stored sign-in, or couldn't be reached" "HTTP Error 401" \
@@ -531,19 +534,30 @@ ob_fixture
 printf '%s' "$T/home/Workspace/notes" >"$T/ob/links/id-team"
 expect_ob_stop "obsidian-sync.sh stops on a dir linked to another vault, naming the unlink and the merge it would make" \
   "$T/home/Workspace/notes is linked to the remote vault Team (id-team), not Personal Notes (id-notes)" \
-  "ob sync-unlink --path $T/home/Workspace/notes" "linking it merges them into Personal Notes" \
-  "mv $T/home/Workspace/notes $T/home/Workspace/notes.old" --
+  "ob sync-unlink --path $T/home/Workspace/notes" \
+  "VAULTS names it for Personal Notes, so the next run links it there and merges those notes in" \
+  "give Personal Notes a new local dir in VAULTS" --
 ob_fixture
 printf '%s' "$T/home/Workspace/elsewhere" >"$T/ob/links/id-notes"
 expect_ob_stop "obsidian-sync.sh stops on a vault linked to another folder, naming the unit and the unlink that free it" \
   "The remote vault Personal Notes (id-notes) is already linked to $T/home/Workspace/elsewhere" \
-  "systemctl --user disable --now obsidian-sync@elsewhere" "ob sync-unlink --path $T/home/Workspace/elsewhere" --
+  "systemctl --user disable --now obsidian-sync@elsewhere.service" "ob sync-unlink --path $T/home/Workspace/elsewhere" --
+# The folder to free is the one another entry wants for another vault.
+ob_fixture
+printf '%s' "$T/home/Workspace/notes" >"$T/ob/links/id-notes"
+expect_ob_stop "obsidian-sync.sh warns that a folder it says to free will merge into the vault VAULTS now names for it" \
+  "The remote vault Personal Notes (id-notes) is already linked to $T/home/Workspace/notes" \
+  "VAULTS names it for Team, so the next run links it there and merges those notes in" -- VAULTS="archive=Personal Notes; notes=Team"
 ob_fixture
 printf '%s' "$T/home/Workspace/My Vault" >"$T/ob/links/id-notes"
 expect_ob_stop "obsidian-sync.sh quotes a linked folder's path in the unlink it names" \
   "ob sync-unlink --path $T/home/Workspace/My\ Vault" --
-if [[ $(obsync) == *"obsidian-sync@My"* ]]; then
-  bad "obsidian-sync.sh names no unit for a folder no VAULTS entry could name"
+out=$(obsync) || true
+ob_fixture
+printf '%s' "$T/home/Workspace/notes..old" >"$T/ob/links/id-notes"
+out2=$(obsync) || true
+if [[ $out == *"obsidian-sync@My"* || $out2 == *"obsidian-sync@notes..old"* || $out2 != *"ob sync-unlink --path $T/home/Workspace/notes..old"* ]]; then
+  bad "obsidian-sync.sh names no unit for a folder no VAULTS entry could name" "$out"$'\n'"$out2"
 else
   ok "obsidian-sync.sh names no unit for a folder no VAULTS entry could name"
 fi
@@ -554,7 +568,7 @@ ob_fixture
 if ! out=$(run REPOS="app=org/app" VAULTS= STUB_RC_UNITS="obsidian-sync@old.service:active" bash "$REPO/optional/obsidian-sync.sh" 2>&1) ||
   [[ $out != *"no vaults to sync"* ]] || grep -q '^ob \|^npm ' "$LOG"; then
   bad "obsidian-sync.sh with VAULTS empty does nothing and exits 0" "$out"
-elif [[ $out != *"note: obsidian-sync@old is set up but not in VAULTS"*"systemctl --user disable --now obsidian-sync@old"* ]]; then
+elif [[ $out != *"note: obsidian-sync@old.service is set up but not in VAULTS"*"systemctl --user disable --now obsidian-sync@old.service"* ]]; then
   bad "obsidian-sync.sh with VAULTS empty still names a sync left running" "$out"
 else
   ok "obsidian-sync.sh with VAULTS empty does nothing but name a sync left running"
@@ -618,7 +632,8 @@ else
 fi
 
 : >"$LOG"
-signed=$(obsync REPOS="notes=org/notes" STUB_STARTED_AT=1) && rc=0 || rc=$?
+# Started in the same second as the sign-in, which may be before it.
+signed=$(obsync REPOS="notes=org/notes" STUB_STARTED_AT="$OB_SIGNED_IN_AT") && rc=0 || rc=$?
 if [ "$rc" -ne 0 ] || ! restarted_each_vault || [[ $signed != *"the owner signed in to Obsidian since it started"* ]]; then
   bad "obsidian-sync.sh restarts each running sync that started before the latest Obsidian sign-in" "$signed"$'\n'"$(cat "$LOG")"
 else
@@ -635,6 +650,18 @@ else
   ok "obsidian-sync.sh links a vault added later, a shared one, and restarts only its unit"
 fi
 
+# notes was unlinked by hand while its sync ran, so the new link has to reach
+# the running process.
+: >"$LOG"
+rm "$T/ob/links/id-notes"
+relinked=$(obsync REPOS="notes=org/notes" STUB_ACTIVE=yes) && rc=0 || rc=$?
+if [ "$rc" -ne 0 ] || [ "$(grep '^ob sync-setup' "$LOG")" != "ob sync-setup --vault id-notes --path $T/home/Workspace/notes --device-name Cloud box" ] ||
+  [ "$(grep '^systemctl --user restart' "$LOG")" != "systemctl --user restart obsidian-sync@notes.service" ]; then
+  bad "obsidian-sync.sh restarts a running sync whose folder it links again" "$relinked"$'\n'"$(cat "$LOG")"
+else
+  ok "obsidian-sync.sh restarts a running sync whose folder it links again"
+fi
+
 : >"$LOG"
 mkdir -p "$(dirname "$OB_UNIT")"
 echo "# edited by hand" >>"$OB_UNIT"
@@ -645,7 +672,7 @@ if [ "$rc" -ne 0 ] || grep -q 'edited by hand' "$OB_UNIT" || grep -q '^ob sync-s
 else
   ok "obsidian-sync.sh puts back a changed unit file and restarts every unit"
 fi
-if [[ $fixed == *"note: obsidian-sync@team is set up but not in VAULTS"*"systemctl --user disable --now obsidian-sync@team"* ]] &&
+if [[ $fixed == *"note: obsidian-sync@team.service is set up but not in VAULTS"*"systemctl --user disable --now obsidian-sync@team.service"* ]] &&
   ! grep -q 'obsidian-sync@team' "$LOG"; then
   ok "obsidian-sync.sh names, and leaves alone, a unit for a vault no longer in VAULTS"
 else
@@ -671,6 +698,20 @@ ob_down "obsidian-sync.sh names a deleted remote vault, not the sign-in" \
   $'Failed to authenticate: Vault not found\nThe connected remote vault no longer exists.' "was deleted or renamed in Obsidian Sync"
 ob_down "obsidian-sync.sh names a refused sign-in with ob logout and ob login" \
   "Failed to authenticate: Invalid token" "After a refusal, the owner runs ob logout first, then ob login"
+ob_down "obsidian-sync.sh names the cause in the latest failed start, not an earlier one" \
+  $'Encryption key not found. Run setup again.\nNo account logged in. Run "ob login" first.' "Obsidian is signed out, or refused the stored sign-in"
+
+# A vault dir whose name starts with a dot still restarts after an install.
+ob_fixture
+obsync VAULTS=".hidden=Personal Notes" >/dev/null || true
+echo 0.0.0-older >"$T/ob/version"
+: >"$LOG"
+out=$(obsync VAULTS=".hidden=Personal Notes") || true
+if grep -qx 'systemctl --user restart obsidian-sync@.hidden.service' "$LOG"; then
+  ok "obsidian-sync.sh restarts a dot-named vault's sync after an install"
+else
+  bad "obsidian-sync.sh restarts a dot-named vault's sync after an install" "$out"$'\n'"$(cat "$LOG")"
+fi
 
 # ---- optional/terminal.sh with vaults ----------------------------------------
 
@@ -943,6 +984,19 @@ elif [[ $out != *"skipped: git is not installed on this laptop"* ]]; then
   bad "push.sh without git says the identity is skipped" "$out"
 else
   ok "push.sh without git carries on, says so and sends no identity"
+fi
+# A Mac without Apple's command line tools has a git that only offers to
+# install them and fails.
+mkdir -p "$T/nogit/macstub"
+printf '#!/bin/bash\necho "xcode-select: note: No developer tools were found, requesting install." >&2\nexit 1\n' >"$T/nogit/macstub/git"
+chmod +x "$T/nogit/macstub/git"
+push_fixture
+out=$(printf 'yes\n' | run PATH="$T/nogit/macstub:$NOGIT_PATH" bash "$REPO/laptop/push.sh" agent@box --connectors none 2>&1) || true
+if [ -z "$(ssh_call_with tar)" ] || [ -n "$(ssh_call_with 'git config')" ] ||
+  [[ $out != *"skipped: git is not installed on this laptop"* ]]; then
+  bad "push.sh treats a git that can't run, as on a Mac without the command line tools, as no git" "$out"
+else
+  ok "push.sh treats a git that can't run, as on a Mac without the command line tools, as no git"
 fi
 
 HEAD_SHA=$(git -C "$REPO" rev-parse HEAD)

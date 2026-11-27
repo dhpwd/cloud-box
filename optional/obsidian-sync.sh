@@ -26,13 +26,16 @@ OBSIDIAN_HEADLESS_VERSION=0.0.14
 SETTLE_SECONDS=${OBSIDIAN_SYNC_SETTLE_SECONDS:-20}
 # ob takes a sign-in from this ahead of the stored one, and the units never
 # have it, so every check here uses the stored sign-in the units use.
+session_token=${OBSIDIAN_AUTH_TOKEN:+set}
 unset OBSIDIAN_AUTH_TOKEN
 
 WORKSPACE="$HOME/Workspace"
 UNITS="$HOME/.config/systemd/user"
 # Holds <dir>.started for each vault whose sync has started since its link,
 # the client and the unit file last changed. Each of those changes removes the
-# file first, so a run that stops before the restart leaves it to the next run.
+# file first (the whole folder for the client or the unit file, which also
+# covers a dir whose name starts with a dot), so a run that stops before the
+# restart leaves it to the next run.
 STARTED="$HOME/.config/obsidian-sync"
 
 note_stray_units() {
@@ -41,7 +44,7 @@ note_stray_units() {
     d=${u#obsidian-sync@}
     d=${d%.service}
     in_list "$d" ${VAULT_DIRS[@]+"${VAULT_DIRS[@]}"} ||
-      echo "    note: obsidian-sync@$d is set up but not in VAULTS, and an enabled one starts again at boot. To remove it: systemctl --user disable --now obsidian-sync@$d"
+      echo "    note: $u is set up but not in VAULTS, and an enabled one starts again at boot. To remove it: systemctl --user disable --now $u"
   done < <(
     {
       systemctl --user list-units 'obsidian-sync@*' --all --plain --no-legend 2>/dev/null
@@ -73,7 +76,7 @@ ob_is_pinned() { [ "$(ob --version 2>/dev/null || true)" = "$OBSIDIAN_HEADLESS_V
 if ! ob_is_pinned; then
   command -v npm >/dev/null || die "npm is not on PATH – run 01-base.sh first"
   # A running sync keeps the client it started with.
-  rm -f "$STARTED"/*.started
+  rm -rf "$STARTED"
   echo "==> Installing obsidian-headless $OBSIDIAN_HEADLESS_VERSION"
   npm install -g "obsidian-headless@$OBSIDIAN_HEADLESS_VERSION"
   hash -r
@@ -87,6 +90,14 @@ login_step="Owner's step: run ob login in a box-user session on their own laptop
 # Obsidian refuses it.
 refused_step="After a refusal, the owner runs ob logout first, then ob login. If Obsidian couldn't be reached, run this again once the box is online.
    $login_step"
+if [ -n "$session_token" ]; then
+  env_note="OBSIDIAN_AUTH_TOKEN is set in this session, and ob login and ob logout would use it in place of the stored sign-in
+   the syncs need. Unset it first, and take it out of any login file that sets it, or the syncs pick it up too."
+  login_step="$env_note
+   $login_step"
+  refused_step="$env_note
+   $refused_step"
+fi
 
 # Exits 2 with no stored sign-in. Lists the vaults over the network, so a
 # stored sign-in Obsidian refuses fails here too. ob's own message goes to the
@@ -132,10 +143,22 @@ done
 free_lines() { # the folder to free
   local d
   d=$(basename "$1")
-  if [ "$(dirname "$1")" = "$WORKSPACE" ] && [[ $d =~ ^[A-Za-z0-9._-]+$ ]]; then
-    echo "     systemctl --user disable --now obsidian-sync@$d"
+  if [ "$(dirname "$1")" = "$WORKSPACE" ] && [[ $d =~ ^[A-Za-z0-9._-]+$ && $d != *..* ]]; then
+    echo "     systemctl --user disable --now obsidian-sync@$d.service"
   fi
   echo "     ob sync-unlink --path $(printf '%q' "$1")"
+}
+# Unlinking leaves a folder's notes where they are. The fix this names is a
+# new, empty folder rather than moving notes, so nothing ends up inside another
+# synced folder or under a running Remote Control session.
+merge_warning() { # the folder to free, which holds another vault's notes
+  local i
+  for i in "${!VAULT_DIRS[@]}"; do
+    if [ "$1" = "$WORKSPACE/${VAULT_DIRS[$i]}" ]; then
+      echo "   Freed, it still holds that vault's notes, and VAULTS names it for ${VAULT_NAMES[$i]}, so the next run links it there and merges those notes in."
+      echo "   To keep them apart, give ${VAULT_NAMES[$i]} a new local dir in VAULTS, which starts empty."
+    fi
+  done
 }
 local_links=$(ob sync-list-local --json) || die "ob sync-list-local failed (its message is above)"
 # Before the link checks, which would otherwise send the owner to unlink a
@@ -161,6 +184,7 @@ for i in "${!VAULT_DIRS[@]}"; do
   if [ -n "$elsewhere" ]; then
     echo "!! The remote vault $name ($id) is already linked to $elsewhere, not $WORKSPACE/$dir. To free it:" >&2
     free_lines "$elsewhere" >&2
+    merge_warning "$elsewhere" >&2
     die "Then run this again."
   fi
   other=$(jq -r --arg id "$id" --arg p "$WORKSPACE/$dir" '.vaults[] | select(.path == $p and .id != $id) | .id' <<<"$local_links" | head -1)
@@ -169,8 +193,7 @@ for i in "${!VAULT_DIRS[@]}"; do
     echo "!! $WORKSPACE/$dir is linked to the remote vault ${other_name:-(not in this account)} ($other), not $name ($id)." >&2
     echo "   This script never unlinks a folder. To link it to $name instead, free it:" >&2
     free_lines "$WORKSPACE/$dir" >&2
-    echo "   The folder still holds that vault's notes, and linking it merges them into $name. To start from $name's notes" >&2
-    echo "   alone, move the folder aside first: mv $(printf '%q' "$WORKSPACE/$dir") $(printf '%q' "$WORKSPACE/$dir.old")" >&2
+    merge_warning "$WORKSPACE/$dir" >&2
     die "Then run this again."
   fi
 done
@@ -212,7 +235,7 @@ WantedBy=default.target
 UNIT
 )
 if [ "$(cat "$UNITS/obsidian-sync@.service" 2>/dev/null)" != "$unit_text" ]; then
-  rm -f "$STARTED"/*.started
+  rm -rf "$STARTED"
   printf '%s\n' "$unit_text" >"$UNITS/obsidian-sync@.service"
   systemctl --user daemon-reload
 fi
@@ -222,6 +245,7 @@ fi
 # The file's time, never its content.
 signed_in_at=$(stat -c %Y "${XDG_CONFIG_HOME:-$HOME/.config}/obsidian-headless/auth_token" 2>/dev/null || echo 0)
 
+mkdir -p "$STARTED"
 started=
 for dir in "${VAULT_DIRS[@]}"; do
   unit="obsidian-sync@$dir.service"
@@ -236,7 +260,9 @@ for dir in "${VAULT_DIRS[@]}"; do
     since=$(systemctl --user show -p ActiveEnterTimestamp --value --timestamp=unix "$unit")
     since=${since#@}
     [[ $since =~ ^[0-9]+$ ]] || since=0
-    [ "$since" -ge "$signed_in_at" ] || why="the owner signed in to Obsidian since it started"
+    # Both times are whole seconds, so a start in the same second as the
+    # sign-in counts as before it.
+    [ "$since" -gt "$signed_in_at" ] || why="the owner signed in to Obsidian since it started"
   fi
   if [ -z "$why" ]; then
     echo "==> $dir: running, unchanged"
@@ -266,9 +292,11 @@ for i in "${!VAULT_DIRS[@]}"; do
   down=1
   log=$(journalctl --user -u "$unit" -n 30 --no-pager -o cat 2>/dev/null || true)
   echo "!! $dir: not active" >&2
-  # ob reports the subscription and a deleted vault through its sign-in error,
-  # "Failed to authenticate: <reason>", so those are matched first.
-  case $log in
+  # The latest line that names a cause, since the journal holds earlier starts
+  # too. ob reports the subscription and a deleted vault through its sign-in
+  # error, "Failed to authenticate: <reason>", so those are matched first.
+  cause=$(grep -E 'subscription to Obsidian Sync has expired|no longer exists|Vault not found|Encryption key not found|Another sync instance|No account logged in|Failed to authenticate' <<<"$log" | tail -1 || true)
+  case $cause in
     *"subscription to Obsidian Sync has expired"*)
       echo "   Owner's step: the Obsidian Sync subscription has expired. Renew it in Obsidian's account settings, then run this again." >&2
       ;;
