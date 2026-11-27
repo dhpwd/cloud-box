@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Optional – the terminal route: mosh, tmux with a session per repo, a kill
+# Optional – the terminal route: mosh, tmux with a session per repo and vault, a kill
 # switch and the shell helpers. Not part of a standard setup. Two parts, each
 # run from this checkout:
 #   as root:          optional/terminal.sh   # packages, and tmux 3.7 from source
@@ -76,8 +76,8 @@ CONF
 # persistence – the supervisor outlives the connection – but mosh has no
 # scrollback, so tmux's copy mode is the only way to read back what happened.
 tmux new-session -d -s agents -c "$HOME/Workspace" 2>/dev/null || true
-# The projects that get a session at build time: every repo in REPOS.
-for p in "${REPO_DIRS[@]}"; do
+# The projects that get a session at build time: every repo and vault.
+for p in "${WORKSPACE_DIRS[@]}"; do
   d="$HOME/Workspace/$p"
   [ -d "$d" ] || continue
   tmux new-session -d -s "${p//./-}" -c "$d" 2>/dev/null || true

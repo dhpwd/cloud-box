@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Step 7 – an always-on Remote Control server for each repo in RC_REPOS, so the
-# Claude desktop and phone apps can start and continue sessions on the box.
+# Step 7 – an always-on Remote Control server for each repo or vault in
+# RC_REPOS, so the Claude desktop and phone apps can start and continue sessions
+# on the box.
 # Runs as the box user, after the trust step (README, step 6). Safe to run
 # again: it restarts only the servers whose settings changed.
 #
@@ -32,7 +33,10 @@ fi
   die "lingering is off for $BOX_USER, so the servers would stop at logout. Run 01-base.sh as root, which turns it on."
 
 for r in "${RC_DIRS[@]}"; do
-  [ -d "$HOME/Workspace/$r" ] || die "$HOME/Workspace/$r is missing – run 03-repos.sh first"
+  [ ! -d "$HOME/Workspace/$r" ] || continue
+  step=optional/obsidian-sync.sh
+  in_list "$r" ${REPO_DIRS[@]+"${REPO_DIRS[@]}"} && step=03-repos.sh
+  die "$HOME/Workspace/$r is missing – run $step first"
 done
 
 conf="$HOME/.config/claude-rc"

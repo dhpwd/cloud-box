@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Step 4 – clone the repos in REPOS into ~/Workspace and install their
-# dependencies. Runs as the box user, after the owner's GitHub sign-in.
+# dependencies. Runs as the box user, after the owner's GitHub sign-in. With
+# REPOS empty (a setup with only vaults) it does nothing.
 #
 #   ./03-repos.sh               # clone what is missing, pull the rest, install
 #   ./03-repos.sh --clone-only  # clone and stop before any install
@@ -20,6 +21,11 @@ case "${1:-}" in
   --clone-only) CLONE_ONLY=1 ;;
   *) die "usage: ${0##*/} [--clone-only]" ;;
 esac
+
+if [ ${#REPO_DIRS[@]} -eq 0 ]; then
+  echo "==> REPOS is empty: no repos to clone. Next: optional/obsidian-sync.sh for the vaults in VAULTS (see the README)"
+  exit 0
+fi
 
 command -v gh >/dev/null || die "gh is not installed – run 01-base.sh first"
 if ! gh auth status >/dev/null 2>&1; then
@@ -97,6 +103,8 @@ fi
 
 if [ -n "$CLONE_ONLY" ]; then
   echo "==> Cloned. Copy any env file a repo needs before its install, then run ${0##*/} without --clone-only"
+elif [ ${#VAULT_DIRS[@]} -gt 0 ]; then
+  echo "==> Done. Next: optional/obsidian-sync.sh for the vaults in VAULTS, then laptop/push.sh from the owner's laptop (see the README)"
 else
   echo "==> Done. Next: laptop/push.sh from the owner's laptop (see the README)"
 fi

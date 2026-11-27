@@ -64,7 +64,6 @@ done
 case $DEST in *?@?*) ;; *) usage ;; esac
 
 command -v ssh >/dev/null || die "ssh is missing on this laptop"
-command -v git >/dev/null || die "git is missing on this laptop"
 # On a Mac without Apple's command line tools, python3 is a stub that offers to
 # install them and exits non-zero, so running it is the test.
 python3 -c '' >/dev/null 2>&1 || die "python3 is missing on this laptop. On a Mac: xcode-select --install"
@@ -433,13 +432,26 @@ if [ -z "$CONNECTORS_SET" ]; then
 fi
 case $CONNECTORS in none | "") CHOSEN= ;; *) CHOSEN=$CONNECTORS ;; esac
 
-GIT_NAME=$(git config --global --includes user.name || true)
-GIT_EMAIL=$(git config --global --includes user.email || true)
+# git is used only to read the identity, so a laptop without it, such as one
+# whose work is all in an Obsidian vault, sends the rest. On a Mac without
+# Apple's command line tools, git is a stub like python3's, so running it is
+# the test.
+GIT_NAME=
+GIT_EMAIL=
+NO_GIT=
+if git --version >/dev/null 2>&1; then
+  GIT_NAME=$(git config --global --includes user.name || true)
+  GIT_EMAIL=$(git config --global --includes user.email || true)
+else
+  NO_GIT=1
+fi
 
 echo
 py preview "$CHOSEN"
 echo "Git identity:"
-if [ -n "$GIT_NAME" ] && [ -n "$GIT_EMAIL" ]; then
+if [ -n "$NO_GIT" ]; then
+  echo "  (skipped: git is not installed on this laptop)"
+elif [ -n "$GIT_NAME" ] && [ -n "$GIT_EMAIL" ]; then
   echo "  $GIT_NAME <$GIT_EMAIL>"
 else
   echo "  (none set on this laptop)"
@@ -473,7 +485,9 @@ if ! py connectors "$CHOSEN" | remote "$cmd"; then
 fi
 
 echo "==> Git identity"
-if [ -n "$GIT_NAME" ] && [ -n "$GIT_EMAIL" ]; then
+if [ -n "$NO_GIT" ]; then
+  echo "    skipped: git is not installed on this laptop"
+elif [ -n "$GIT_NAME" ] && [ -n "$GIT_EMAIL" ]; then
   if ! remote "git config --global user.name $(printf '%q' "$GIT_NAME") && git config --global user.email $(printf '%q' "$GIT_EMAIL")" </dev/null; then
     echo "!! setting the git identity failed" >&2
     failed=1
