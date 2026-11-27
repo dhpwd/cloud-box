@@ -85,6 +85,8 @@ trim() {
 
 # Sets REPO_DIRS and REPO_SLUGS from REPOS, VAULT_DIRS and VAULT_REMOTES from
 # VAULTS, and RC_DIRS and RC_AGENTS from RC_REPOS, as parallel arrays.
+# WORKSPACE_DIRS is every folder in ~/Workspace they name: the repos, then the
+# vaults that aren't also repos.
 read_inputs() {
   load_box_env
   local where="set it in $BOX_ENV_FILE (box.env.example shows the format)"
@@ -98,7 +100,7 @@ read_inputs() {
   printf '%s\n' "$OPERATOR_PUBKEY" | ssh-keygen -l -f - >/dev/null 2>&1 ||
     die "OPERATOR_PUBKEY is not a valid SSH public key (is the example's placeholder still in place?)"
 
-  local entries entry dir slug remote agent i
+  local entries entry dir slug remote agent
   REPO_DIRS=()
   REPO_SLUGS=()
   read -r -a entries <<<"${REPOS:-}"
@@ -131,29 +133,9 @@ read_inputs() {
     VAULT_REMOTES+=("$remote")
   done
   [ ${#REPO_DIRS[@]} -gt 0 ] || [ ${#VAULT_DIRS[@]} -gt 0 ] || die "REPOS and VAULTS are both empty: $where"
-
-  RC_DIRS=()
-  RC_AGENTS=()
-  if [ -n "${RC_REPOS:-}" ]; then
-    read -r -a entries <<<"$RC_REPOS"
-  else
-    entries=(${REPO_DIRS[@]+"${REPO_DIRS[@]}"})
-    for dir in ${VAULT_DIRS[@]+"${VAULT_DIRS[@]}"}; do
-      in_list "$dir" ${REPO_DIRS[@]+"${REPO_DIRS[@]}"} || entries+=("$dir")
-    done
-  fi
-  for entry in "${entries[@]}"; do
-    dir=${entry%%:*}
-    agent=
-    [ "$dir" = "$entry" ] || agent=${entry#*:}
-    in_list "$dir" ${REPO_DIRS[@]+"${REPO_DIRS[@]}"} ${VAULT_DIRS[@]+"${VAULT_DIRS[@]}"} ||
-      die "RC_REPOS entry '$entry': '$dir' is not a local directory in REPOS or VAULTS"
-    if in_list "$dir" ${RC_DIRS[@]+"${RC_DIRS[@]}"}; then
-      die "RC_REPOS entry '$entry': '$dir' is repeated"
-    fi
-    [ "$dir" = "$entry" ] || [[ $agent =~ ^[A-Za-z0-9._-]+$ ]] || die "RC_REPOS entry '$entry': '$agent' is not an agent name"
-    RC_DIRS+=("$dir")
-    RC_AGENTS+=("$agent")
+  WORKSPACE_DIRS=(${REPO_DIRS[@]+"${REPO_DIRS[@]}"})
+  for dir in ${VAULT_DIRS[@]+"${VAULT_DIRS[@]}"}; do
+    in_list "$dir" "${WORKSPACE_DIRS[@]}" || WORKSPACE_DIRS+=("$dir")
   done
 
   RC_SPAWN=${RC_SPAWN:-same-dir}
@@ -161,13 +143,28 @@ read_inputs() {
     same-dir | worktree) ;;
     *) die "RC_SPAWN=$RC_SPAWN: use same-dir or worktree" ;;
   esac
-  if [ "$RC_SPAWN" = worktree ]; then
-    for i in "${!RC_DIRS[@]}"; do
-      dir=${RC_DIRS[$i]}
-      in_list "$dir" ${REPO_DIRS[@]+"${REPO_DIRS[@]}"} && continue
-      die "RC_SPAWN=worktree: the Remote Control entry '$dir${RC_AGENTS[$i]:+:${RC_AGENTS[$i]}}' is a vault with no git repository, and worktree mode needs a git repository. Use RC_SPAWN=same-dir, or leave $dir out of RC_REPOS"
-    done
+
+  RC_DIRS=()
+  RC_AGENTS=()
+  if [ -n "${RC_REPOS:-}" ]; then
+    read -r -a entries <<<"$RC_REPOS"
+  else
+    entries=("${WORKSPACE_DIRS[@]}")
   fi
+  for entry in "${entries[@]}"; do
+    dir=${entry%%:*}
+    agent=
+    [ "$dir" = "$entry" ] || agent=${entry#*:}
+    in_list "$dir" "${WORKSPACE_DIRS[@]}" || die "RC_REPOS entry '$entry': '$dir' is not a local directory in REPOS or VAULTS"
+    if in_list "$dir" ${RC_DIRS[@]+"${RC_DIRS[@]}"}; then
+      die "RC_REPOS entry '$entry': '$dir' is repeated"
+    fi
+    [ "$dir" = "$entry" ] || [[ $agent =~ ^[A-Za-z0-9._-]+$ ]] || die "RC_REPOS entry '$entry': '$agent' is not an agent name"
+    [ "$RC_SPAWN" != worktree ] || in_list "$dir" ${REPO_DIRS[@]+"${REPO_DIRS[@]}"} ||
+      die "RC_SPAWN=worktree: the Remote Control entry '$entry' is a vault with no git repository, and worktree mode needs a git repository. Use RC_SPAWN=same-dir, or leave $dir out of RC_REPOS"
+    RC_DIRS+=("$dir")
+    RC_AGENTS+=("$agent")
+  done
   RC_CAPACITY=${RC_CAPACITY:-}
   [ -z "$RC_CAPACITY" ] || [[ $RC_CAPACITY =~ ^[1-9][0-9]*$ ]] || die "RC_CAPACITY=$RC_CAPACITY: use a whole number from 1, or leave it unset"
 }

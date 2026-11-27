@@ -43,14 +43,14 @@ for dir in "${VAULT_DIRS[@]}"; do
   fi
 done
 
+ob_is_pinned() { [ "$(ob --version 2>/dev/null || true)" = "$OBSIDIAN_HEADLESS_VERSION" ]; }
 pin_changed=
-if [ "$(ob --version 2>/dev/null || true)" != "$OBSIDIAN_HEADLESS_VERSION" ]; then
+if ! ob_is_pinned; then
   command -v npm >/dev/null || die "npm is not on PATH – run 01-base.sh first"
   echo "==> Installing obsidian-headless $OBSIDIAN_HEADLESS_VERSION"
   npm install -g "obsidian-headless@$OBSIDIAN_HEADLESS_VERSION"
   hash -r
-  [ "$(ob --version 2>/dev/null || true)" = "$OBSIDIAN_HEADLESS_VERSION" ] ||
-    die "ob --version doesn't print $OBSIDIAN_HEADLESS_VERSION after the install. Check npm's output above"
+  ob_is_pinned || die "ob --version doesn't print $OBSIDIAN_HEADLESS_VERSION after the install. Check npm's output above"
   pin_changed=1
 fi
 
@@ -68,22 +68,24 @@ case $rc in
   2) die "Obsidian is not signed in on this box. $login_step" ;;
   *) die "Obsidian refused the stored sign-in, or couldn't be reached (ob's message is above). $login_step" ;;
 esac
-jq -e '.vaults | type == "array"' <<<"$remote" >/dev/null 2>&1 || die "ob sync-list-remote --json printed something that isn't its vault list"
+# The vaults the account owns and those shared with it, as one list.
+all_vaults=$(jq -ce '.vaults + (.shared // [])' <<<"$remote" 2>/dev/null) ||
+  die "ob sync-list-remote --json printed something that isn't its vault list"
 
 # Each VAULTS entry's remote part, as an ID first, else as the one vault of
-# that name, among the vaults the account owns and those shared with it.
+# that name.
 VAULT_IDS=()
 VAULT_NAMES=()
 for i in "${!VAULT_DIRS[@]}"; do
   dir=${VAULT_DIRS[$i]}
   want=${VAULT_REMOTES[$i]}
   matches=$(jq -r --arg w "$want" '
-    ((.vaults // []) + (.shared // [])) as $all
+    . as $all
     | ([$all[] | select(.id == $w)] | if length > 0 then . else [$all[] | select(.name == $w)] end)
-    | .[] | "\(.id)\t\(.name)"' <<<"$remote")
+    | .[] | "\(.id)\t\(.name)"' <<<"$all_vaults")
   if [ -z "$matches" ]; then
     echo "!! VAULTS entry for $dir: no remote vault in this Obsidian account has the ID or name '$want'. Its vaults:" >&2
-    jq -r '((.vaults // []) + (.shared // []))[] | "!!   \(.name)"' <<<"$remote" >&2
+    jq -r '.[] | "!!   \(.name)"' <<<"$all_vaults" >&2
     die "Fix the name in VAULTS, then run this again."
   fi
   if [ "$(wc -l <<<"$matches")" -gt 1 ]; then
@@ -103,24 +105,21 @@ free_lines() { # the folder to free
   fi
   echo "     ob sync-unlink --path $1"
 }
-rc=0
-local_links=$(ob sync-list-local --json) || rc=$?
-[ "$rc" -eq 0 ] || die "ob sync-list-local failed (its message is above)"
+local_links=$(ob sync-list-local --json) || die "ob sync-list-local failed (its message is above)"
 for i in "${!VAULT_DIRS[@]}"; do
   dir=${VAULT_DIRS[$i]}
   id=${VAULT_IDS[$i]}
   name=${VAULT_NAMES[$i]}
-  for j in "${!VAULT_DIRS[@]}"; do
-    if [ "$j" -lt "$i" ] && [ "${VAULT_IDS[$j]}" = "$id" ]; then
-      echo "!! VAULTS entries ${VAULT_DIRS[$j]} and $dir both name the remote vault $name ($id), and a remote vault syncs to one folder." >&2
-      echo "   Keep one of them in VAULTS." >&2
-      linked=$(jq -r --arg id "$id" '.vaults[] | select(.id == $id) | .path' <<<"$local_links")
-      if [ -n "$linked" ]; then
-        echo "   It is linked to $linked now. If that is the one you drop, free it with:" >&2
-        free_lines "$linked" >&2
-      fi
-      die "Then run this again."
+  for ((j = 0; j < i; j++)); do
+    [ "${VAULT_IDS[$j]}" = "$id" ] || continue
+    echo "!! VAULTS entries ${VAULT_DIRS[$j]} and $dir both name the remote vault $name ($id), and a remote vault syncs to one folder." >&2
+    echo "   Keep one of them in VAULTS." >&2
+    linked=$(jq -r --arg id "$id" '.vaults[] | select(.id == $id) | .path' <<<"$local_links")
+    if [ -n "$linked" ]; then
+      echo "   It is linked to $linked now. If that is the one you drop, free it with:" >&2
+      free_lines "$linked" >&2
     fi
+    die "Then run this again."
   done
   elsewhere=$(jq -r --arg id "$id" --arg p "$WORKSPACE/$dir" '.vaults[] | select(.id == $id and .path != $p) | .path' <<<"$local_links")
   if [ -n "$elsewhere" ]; then
@@ -130,7 +129,7 @@ for i in "${!VAULT_DIRS[@]}"; do
   fi
   other=$(jq -r --arg id "$id" --arg p "$WORKSPACE/$dir" '.vaults[] | select(.path == $p and .id != $id) | .id' <<<"$local_links" | head -1)
   if [ -n "$other" ]; then
-    other_name=$(jq -r --arg id "$other" '((.vaults // []) + (.shared // []))[] | select(.id == $id) | .name' <<<"$remote" | head -1)
+    other_name=$(jq -r --arg id "$other" '.[] | select(.id == $id) | .name' <<<"$all_vaults" | head -1)
     echo "!! $WORKSPACE/$dir is linked to the remote vault ${other_name:-(not in this account)} ($other), not $name ($id)." >&2
     echo "   This script never unlinks a folder. To link it to $name instead:" >&2
     free_lines "$WORKSPACE/$dir" >&2

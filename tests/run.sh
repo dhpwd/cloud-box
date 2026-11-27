@@ -82,6 +82,7 @@ for c in sudo dpkg adduser useradd usermod gpasswd passwd locale-gen update-loca
   stub "$c" 'echo "stub: $0 must not run in tests" >&2; exit 1'
 done
 stub uv 'case $1 in tool) exit 0 ;; esac'
+stub tmux 'case $1 in -V) echo "tmux 3.7" ;; esac'
 # Serves laptop/push.sh from the commit a raw.githubusercontent.com URL names,
 # as GitHub would, and refuses anything else. With STUB_CURL_FAIL it writes the
 # file and then fails, as a transfer cut off part-way can.
@@ -185,6 +186,7 @@ fresh_home() {
 REAL_HOME=$HOME
 watched() {
   for p in "$REAL_HOME/.config/systemd/user/claude-rc@.service" "$REAL_HOME/.config/systemd/user/obsidian-sync@.service" \
+    "$REAL_HOME/.tmux.conf" \
     /etc/cloud-box /run/cloud-box \
     /etc/ssh/sshd_config.d/00-cloud-box-key-only.conf; do
     if [ -e "$p" ]; then printf '%s %s\n' "$p" "$(sha256sum "$p" 2>/dev/null | cut -c1-16 || echo dir)"; else echo "$p absent"; fi
@@ -454,6 +456,10 @@ obsync() {
 }
 OB_UNIT="$T/home/.config/systemd/user/obsidian-sync@.service"
 leaks() { [[ $1 != *"$OB_TOKEN"* && $1 != *"$OB_PASSWORD"* ]]; }
+restarted_each_vault() {
+  grep -qx 'systemctl --user restart obsidian-sync@notes.service' "$LOG" &&
+    grep -qx 'systemctl --user restart obsidian-sync@journal.service' "$LOG"
+}
 # name, each expected text, --, then NAME=value overrides. Passes only if the
 # script stops before linking anything or writing a unit.
 expect_ob_stop() {
@@ -536,8 +542,7 @@ elif [ "$setups" != "ob sync-setup --vault id-notes --path $T/home/Workspace/not
   bad "obsidian-sync.sh first run links each vault once, by its resolved ID" "$setups"
 elif [ ! -f "$OB_UNIT" ] || ! grep -qxF "ExecStart=/bin/bash -lc 'exec ob sync --continuous --path %h/Workspace/%i'" "$OB_UNIT"; then
   bad "obsidian-sync.sh first run writes the unit" "$(cat "$OB_UNIT" 2>&1)"
-elif ! grep -qx 'systemctl --user restart obsidian-sync@notes.service' "$LOG" ||
-  ! grep -qx 'systemctl --user restart obsidian-sync@journal.service' "$LOG"; then
+elif ! restarted_each_vault; then
   bad "obsidian-sync.sh first run starts each unit" "$(cat "$LOG")"
 elif [[ $first != *"notes ($T/home/Workspace/notes): Personal Notes, active"* || $first != *"journal ($T/home/Workspace/journal): Journal, active"* ]]; then
   bad "obsidian-sync.sh first run ends naming each vault active" "$first"
@@ -562,8 +567,7 @@ fi
 echo 0.0.13 >"$T/ob/version"
 bumped=$(obsync REPOS="notes=org/notes") && rc=0 || rc=$?
 if [ "$rc" -ne 0 ] || ! grep -qx 'npm install -g obsidian-headless@0.0.14' "$LOG" || grep -q '^ob sync-setup' "$LOG" ||
-  ! grep -qx 'systemctl --user restart obsidian-sync@notes.service' "$LOG" ||
-  ! grep -qx 'systemctl --user restart obsidian-sync@journal.service' "$LOG"; then
+  ! restarted_each_vault; then
   bad "obsidian-sync.sh with the pin changed reinstalls and restarts every unit" "$bumped"$'\n'"$(cat "$LOG")"
 else
   ok "obsidian-sync.sh with the pin changed reinstalls and restarts every unit"
@@ -583,8 +587,7 @@ fi
 echo "# edited by hand" >>"$OB_UNIT"
 fixed=$(obsync REPOS="notes=org/notes" STUB_RC_UNITS="obsidian-sync@team.service:active") && rc=0 || rc=$?
 if [ "$rc" -ne 0 ] || grep -q 'edited by hand' "$OB_UNIT" || grep -q '^ob sync-setup' "$LOG" ||
-  ! grep -qx 'systemctl --user restart obsidian-sync@notes.service' "$LOG" ||
-  ! grep -qx 'systemctl --user restart obsidian-sync@journal.service' "$LOG"; then
+  ! restarted_each_vault; then
   bad "obsidian-sync.sh puts back a changed unit file and restarts every unit" "$fixed"$'\n'"$(cat "$LOG")"
 else
   ok "obsidian-sync.sh puts back a changed unit file and restarts every unit"
@@ -594,6 +597,17 @@ if [[ $fixed == *"note: obsidian-sync@team is set up but not in VAULTS"*"systemc
   ok "obsidian-sync.sh names, and leaves alone, a unit for a vault no longer in VAULTS"
 else
   bad "obsidian-sync.sh names, and leaves alone, a unit for a vault no longer in VAULTS" "$fixed"$'\n'"$(cat "$LOG")"
+fi
+
+# ---- optional/terminal.sh with vaults ----------------------------------------
+
+fresh_home
+mkdir -p "$T/home/Workspace/app" "$T/home/Workspace/notes"
+out=$(run REPOS="app=org/app" VAULTS="notes=Notes; app=App Notes" bash "$REPO/optional/terminal.sh" 2>&1) || true
+if [ "$(grep '^tmux new-session' "$LOG")" = "tmux new-session -d -s agents -c $T/home/Workspace"$'\n'"tmux new-session -d -s app -c $T/home/Workspace/app"$'\n'"tmux new-session -d -s notes -c $T/home/Workspace/notes" ]; then
+  ok "optional/terminal.sh opens one tmux session per repo and vault"
+else
+  bad "optional/terminal.sh opens one tmux session per repo and vault" "$out"$'\n'"$(cat "$LOG")"
 fi
 
 # ---- laptop/push.sh ----------------------------------------------------------
@@ -838,13 +852,10 @@ fi
 # A PATH with every command run() offers except git, which /usr/bin and the
 # git stub would otherwise supply.
 mkdir -p "$T/nogit/bin" "$T/nogit/stubs"
-for f in /usr/bin/* /bin/*; do
-  case ${f##*/} in git | git-*) continue ;; esac
-  [ -e "$T/nogit/bin/${f##*/}" ] || ln -s "$f" "$T/nogit/bin/"
-done
-for f in "$STUBS"/*; do
-  [ "${f##*/}" = git ] || ln -s "$f" "$T/nogit/stubs/"
-done
+ln -s /usr/bin/* "$T/nogit/bin/"
+[ /bin -ef /usr/bin ] || ln -sf /bin/* "$T/nogit/bin/"
+ln -s "$STUBS"/* "$T/nogit/stubs/"
+rm -f "$T/nogit/bin/git" "$T/nogit/bin"/git-* "$T/nogit/stubs/git"
 NOGIT_PATH="$T/nogit/stubs:$T/nogit/bin:/usr/sbin:/sbin"
 push_fixture
 if env -i PATH="$NOGIT_PATH" bash -c 'command -v git' >/dev/null; then

@@ -34,10 +34,9 @@ fi
 
 for r in "${RC_DIRS[@]}"; do
   [ ! -d "$HOME/Workspace/$r" ] || continue
-  if in_list "$r" ${REPO_DIRS[@]+"${REPO_DIRS[@]}"}; then
-    die "$HOME/Workspace/$r is missing – run 03-repos.sh first"
-  fi
-  die "$HOME/Workspace/$r is missing – run optional/obsidian-sync.sh first"
+  step=optional/obsidian-sync.sh
+  in_list "$r" ${REPO_DIRS[@]+"${REPO_DIRS[@]}"} && step=03-repos.sh
+  die "$HOME/Workspace/$r is missing – run $step first"
 done
 
 conf="$HOME/.config/claude-rc"
