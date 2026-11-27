@@ -40,7 +40,38 @@ stub() {
   chmod +x "$STUBS/$1"
 }
 
-for c in apt apt-get bun pnpm npm pre-commit journalctl scp logger; do stub "$c"; done
+for c in apt apt-get bun pnpm pre-commit journalctl scp logger; do stub "$c"; done
+# An install of obsidian-headless leaves the ob stub reporting its version.
+stub npm 'case "$1 $2" in "install -g") mkdir -p "$STUB_DIR/ob"; echo "${3#obsidian-headless@}" >"$STUB_DIR/ob/version" ;; esac'
+# Obsidian's headless client. Remote vaults come from $STUB_DIR/ob-remote.json,
+# and each link sync-setup makes is a file in $STUB_DIR/ob/links named by the
+# vault ID, holding the folder. sync-setup reads an encryption password from
+# its standard input, as the real one prompts for it, and stores a key made
+# from it where the real one does.
+stub ob 'st="$STUB_DIR/ob"; mkdir -p "$st/links"
+case $1 in
+  --version) if [ -f "$st/version" ]; then cat "$st/version"; else echo "ob: command not found" >&2; exit 127; fi ;;
+  sync-list-remote)
+    case ${STUB_OB_AUTH:-in} in
+      out) echo "No account logged in. Run \"ob login\" first." >&2; exit 2 ;;
+      refused) echo "Failed to list vaults: Error: HTTP Error 401" >&2; exit 1 ;;
+    esac
+    cat "$STUB_DIR/ob-remote.json" ;;
+  sync-list-local)
+    sep=; printf "{\"vaults\":["
+    for f in "$st"/links/*; do
+      [ -f "$f" ] || continue
+      printf "%s{\"id\":\"%s\",\"path\":\"%s\",\"host\":\"sync-1.obsidian.md\"}" "$sep" "${f##*/}" "$(cat "$f")"; sep=,
+    done
+    printf "]}\n" ;;
+  sync-setup)
+    shift; id=; path=
+    while [ $# -gt 0 ]; do case $1 in --vault) id=$2; shift 2 ;; --path) path=$2; shift 2 ;; *) shift ;; esac; done
+    read -r pw || pw=
+    mkdir -p "$path" "$HOME/.config/obsidian-headless/sync/$id"
+    printf "{\"encryptionKey\": \"key-of-%s\"}\n" "$pw" >"$HOME/.config/obsidian-headless/sync/$id/config.json"
+    printf "%s" "$path" >"$st/links/$id" ;;
+esac'
 printf '#!/bin/bash\n[ "$*" != "-w 60 8" ] || touch "$STUB_DIR/keys-lock-tried"\nexec /usr/bin/flock "$@"\n' >"$STUBS/flock"
 chmod +x "$STUBS/flock"
 stub ufw 'case "$1 $2" in "--force reset")
@@ -67,9 +98,12 @@ stub ip6tables 'echo "-P INPUT DROP"'
 stub id 'case $1 in -u) echo "${STUB_UID:-1000}" ;; -un) echo "${STUB_USER:-agent}" ;; *) exec /usr/bin/id "$@" ;; esac'
 stub runuser 'while [ "$1" != -- ]; do shift; done; shift; exec "$@"'
 stub loginctl 'echo "${STUB_LINGER:-yes}"'
-stub systemctl 'case $* in
-  *is-active*) [ "${STUB_ACTIVE:-no}" = yes ] ;;
-  *show*) echo 4242 ;;
+# A unit started or restarted is active from then on.
+stub systemctl 'u=${!#}
+case " $* " in
+  *" is-active "*) [ "${STUB_ACTIVE:-no}" = yes ] || [ -e "$STUB_DIR/active/$u" ] ;;
+  *" start "* | *" restart "*) mkdir -p "$STUB_DIR/active"; touch "$STUB_DIR/active/$u" ;;
+  *" show "*) echo 4242 ;;
   *list-units*)
     for e in ${STUB_RC_UNITS:-}; do
       case " $* " in *" --all "*) ;; *) [ "${e#*:}" = active ] || continue ;; esac
@@ -141,7 +175,7 @@ run() {
 }
 
 fresh_home() {
-  rm -rf "${T:?}/home" "$T/ssh" "$T/claude-registry"
+  rm -rf "${T:?}/home" "$T/ssh" "$T/claude-registry" "$T/active" "$T/ob"
   mkdir -p "$T/home"
   : >"$LOG"
 }
@@ -150,7 +184,8 @@ fresh_home() {
 # its isolation failed.
 REAL_HOME=$HOME
 watched() {
-  for p in "$REAL_HOME/.config/systemd/user/claude-rc@.service" /etc/cloud-box /run/cloud-box \
+  for p in "$REAL_HOME/.config/systemd/user/claude-rc@.service" "$REAL_HOME/.config/systemd/user/obsidian-sync@.service" \
+    /etc/cloud-box /run/cloud-box \
     /etc/ssh/sshd_config.d/00-cloud-box-key-only.conf; do
     if [ -e "$p" ]; then printf '%s %s\n' "$p" "$(sha256sum "$p" 2>/dev/null | cut -c1-16 || echo dir)"; else echo "$p absent"; fi
   done
@@ -173,11 +208,12 @@ expect_refusal() { # name, expected text, then NAME=value overrides and the scri
 }
 
 for s in scripts/01-base.sh scripts/02-tailscale-lockdown.sh scripts/03-repos.sh scripts/04-connectors.sh \
-  scripts/05-remote-control.sh scripts/06-handover.sh optional/terminal.sh optional/playwright-mcp.sh; do
+  scripts/05-remote-control.sh scripts/06-handover.sh optional/terminal.sh optional/playwright-mcp.sh \
+  optional/obsidian-sync.sh; do
   expect_refusal "missing BOX_USER stops $s" "BOX_USER is missing" BOX_USER= bash "$REPO/$s"
 done
 expect_refusal "missing OPERATOR_PUBKEY is named" "OPERATOR_PUBKEY is missing" OPERATOR_PUBKEY= bash "$REPO/scripts/03-repos.sh"
-expect_refusal "missing REPOS is named" "REPOS is missing" REPOS= bash "$REPO/scripts/03-repos.sh"
+expect_refusal "REPOS and VAULTS both empty is refused" "REPOS and VAULTS are both empty" REPOS= VAULTS= bash "$REPO/scripts/03-repos.sh"
 expect_refusal "the example's placeholder key is refused" "OPERATOR_PUBKEY is not a valid SSH public key" \
   OPERATOR_PUBKEY="ssh-ed25519 <the builder's public key> <comment>" bash "$REPO/scripts/01-base.sh"
 expect_refusal "BOX_USER=root is refused" "BOX_USER=root" BOX_USER=root bash "$REPO/scripts/01-base.sh"
@@ -187,8 +223,59 @@ expect_refusal "a repeated local directory is refused" "the local directory 'app
 expect_refusal "an absolute local directory is refused" "is an absolute path" REPOS="/srv/app=org/app" bash "$REPO/scripts/03-repos.sh"
 expect_refusal "a local directory with '/' is refused" "contains '/'" REPOS="a/b=org/app" bash "$REPO/scripts/03-repos.sh"
 expect_refusal "a local directory with '..' is refused" "contains '..'" REPOS="..=org/app" bash "$REPO/scripts/03-repos.sh"
-expect_refusal "an RC_REPOS entry missing from REPOS is refused" "'web' is not a local directory in REPOS" \
+expect_refusal "an RC_REPOS entry missing from REPOS and VAULTS is refused" "'web' is not a local directory in REPOS or VAULTS" \
   RC_REPOS="app web" bash "$REPO/scripts/05-remote-control.sh"
+
+vault_refusal() { # name, expected text, VAULTS
+  expect_refusal "a VAULTS entry $1 is refused" "$2" VAULTS="$3" bash "$REPO/scripts/03-repos.sh"
+}
+vault_refusal "with no '='" "VAULTS entry 'notes' is not <local dir>=<remote vault name or ID>" "notes"
+vault_refusal "with an empty remote vault" "VAULTS entry 'notes =': the remote vault is empty" "notes = ;journal=Journal"
+vault_refusal "with an empty local directory" "VAULTS entry '=Notes': the local directory is empty" "=Notes"
+vault_refusal "with a '.' local directory" "VAULTS entry '.=Notes': the local directory is '.'" ".=Notes"
+vault_refusal "with an absolute local directory" "VAULTS entry '/srv/n=Notes': the local directory is an absolute path" "/srv/n=Notes"
+vault_refusal "with '/' in the local directory" "VAULTS entry 'a/b=Notes': the local directory contains '/'" "a/b=Notes"
+vault_refusal "with '..' in the local directory" "VAULTS entry '..=Notes': the local directory contains '..'" "..=Notes"
+vault_refusal "with other characters in the local directory" "VAULTS entry 'my notes=Notes': use only letters, digits" "my notes=Notes"
+vault_refusal "repeating a local directory" "VAULTS entry 'notes=Other': the local directory 'notes' is repeated" "notes=Notes; notes=Other"
+vault_refusal "naming a remote vault twice" "VAULTS entry 'b = My Notes': the remote vault 'My Notes' is named twice" "a=My Notes; b = My Notes"
+expect_refusal "RC_SPAWN=worktree is refused for a vault without git" \
+  "RC_SPAWN=worktree: the Remote Control entry 'notes' is a vault with no git repository, and worktree mode needs a git repository" \
+  REPOS="app=org/app" VAULTS="notes=Notes" RC_SPAWN=worktree bash "$REPO/scripts/03-repos.sh"
+expect_refusal "RC_SPAWN=worktree names an RC_REPOS entry with an agent" "the Remote Control entry 'notes:writer' is a vault" \
+  REPOS="app=org/app" VAULTS="notes=Notes" RC_REPOS="app notes:writer" RC_SPAWN=worktree bash "$REPO/scripts/03-repos.sh"
+
+# Prints the arrays read_inputs sets, one per line.
+inputs() {
+  fresh_home
+  run "$@" bash -c '. "$1" && read_inputs && printf "%s\n" "repos=${REPO_DIRS[*]}" "vaults=${VAULT_DIRS[*]}" \
+    "remotes=$(IFS="|"; echo "${VAULT_REMOTES[*]}")" "rc=${RC_DIRS[*]}" "agents=${RC_AGENTS[*]}"' _ "$REPO/scripts/lib.sh" 2>&1 || true
+}
+out=$(inputs REPOS= VAULTS="  notes = Personal Notes ;journal=Journal; ")
+want=$'repos=\nvaults=notes journal\nremotes=Personal Notes|Journal\nrc=notes journal\nagents= '
+if [ "$out" = "$want" ]; then
+  ok "VAULTS alone passes, its entries trimmed, and each vault gets a Remote Control server"
+else
+  bad "VAULTS alone passes, its entries trimmed, and each vault gets a Remote Control server" "$out"
+fi
+out=$(inputs REPOS="app=org/app notes=org/notes" VAULTS="notes=Personal Notes; journal=Journal")
+if [ "$(sed -n 's/^rc=//p' <<<"$out")" = "app notes journal" ]; then
+  ok "a vault dir that is also in REPOS passes, and the default RC_REPOS lists it once"
+else
+  bad "a vault dir that is also in REPOS passes, and the default RC_REPOS lists it once" "$out"
+fi
+out=$(inputs REPOS="app=org/app" VAULTS="notes=Notes" RC_REPOS="notes:writer")
+if [ "$(sed -n 's/^rc=//p' <<<"$out")" = notes ] && [ "$(sed -n 's/^agents=//p' <<<"$out")" = writer ]; then
+  ok "an RC_REPOS entry naming a vault-only dir passes"
+else
+  bad "an RC_REPOS entry naming a vault-only dir passes" "$out"
+fi
+out=$(inputs REPOS="notes=org/notes" VAULTS="notes=Notes" RC_SPAWN=worktree)
+if [ "$(sed -n 's/^rc=//p' <<<"$out")" = notes ]; then
+  ok "RC_SPAWN=worktree passes for a vault that is also a repo"
+else
+  bad "RC_SPAWN=worktree passes for a vault that is also a repo" "$out"
+fi
 
 fresh_home
 printf 'BOX_USER=from-file\nREPOS="app=org/app"\n' >"$T/box.env"
@@ -304,6 +391,209 @@ elif [[ $out != *"app: git pull --ff-only failed"* ]] || grep -qE '^(npm|pnpm|bu
   bad "03-repos.sh names a failed pull and installs nothing on top of it" "$out"
 else
   ok "03-repos.sh names a failed pull and installs nothing on top of it"
+fi
+
+fresh_home
+if ! out=$(run REPOS= VAULTS="notes=Notes" STUB_GH_AUTH=out bash "$REPO/scripts/03-repos.sh" 2>&1); then
+  bad "03-repos.sh with only vaults exits 0" "$out"
+elif grep -qE '^(gh|git|uv|pre-commit) ' "$LOG" || [ -e "$T/home/Workspace" ] || [[ $out != *"no repos to clone"* ]]; then
+  bad "03-repos.sh with only vaults says so and calls no gh, before writing anything" "$out"$'\n'"$(cat "$LOG")"
+else
+  ok "03-repos.sh with only vaults says so and calls no gh, before writing anything"
+fi
+
+# ---- 05-remote-control.sh with vaults ----------------------------------------
+
+fresh_home
+mkdir -p "$T/home/Workspace/notes"
+out=$(run REPOS="app=org/app" VAULTS="notes=Notes; journal=Journal" bash "$REPO/scripts/05-remote-control.sh" 2>&1) || true
+mkdir -p "$T/home/Workspace/app"
+out2=$(run REPOS="app=org/app" VAULTS="notes=Notes; journal=Journal" bash "$REPO/scripts/05-remote-control.sh" 2>&1) || true
+if [[ $out != *"Workspace/app is missing – run 03-repos.sh first"* ]] ||
+  [[ $out2 != *"Workspace/journal is missing – run optional/obsidian-sync.sh first"* ]]; then
+  bad "05-remote-control.sh names the step that makes a missing repo or vault folder" "$out"$'\n'"$out2"
+else
+  ok "05-remote-control.sh names the step that makes a missing repo or vault folder"
+fi
+# Its server already running as wanted, so the script doesn't wait for a start.
+fresh_home
+mkdir -p "$T/home/Workspace/notes"
+if ! out=$(run REPOS= VAULTS="notes=Notes" STUB_ACTIVE=yes STUB_PS_ARGS="claude remote-control --spawn same-dir --name notes" \
+  bash "$REPO/scripts/05-remote-control.sh" 2>&1); then
+  bad "05-remote-control.sh serves a vault with no repos: exited non-zero" "$out"
+elif ! grep -qx 'systemctl --user enable --quiet claude-rc@notes.service' "$LOG" || [[ $out != *"    notes: active"* ]]; then
+  bad "05-remote-control.sh serves a vault with no repos" "$out"$'\n'"$(cat "$LOG")"
+else
+  ok "05-remote-control.sh serves a vault with no repos"
+fi
+
+# ---- optional/obsidian-sync.sh -----------------------------------------------
+
+OB_TOKEN=OBTOKENSENTINEL555
+OB_PASSWORD=OBPASSWORDSENTINEL666
+cat >"$T/ob-remote.json" <<'JSON'
+{"vaults": [{"id": "id-notes", "name": "Personal Notes", "region": "eu"},
+            {"id": "id-journal", "name": "Journal", "region": "eu"},
+            {"id": "id-dup1", "name": "Shared Name", "region": "eu"}],
+ "shared": [{"id": "id-dup2", "name": "Shared Name", "region": "us"},
+            {"id": "id-team", "name": "Team", "region": "us"}]}
+JSON
+# Signed in, with the pinned client installed and nothing linked.
+ob_fixture() {
+  fresh_home
+  mkdir -p "$T/ob/links" "$T/home/.config/obsidian-headless"
+  echo 0.0.14 >"$T/ob/version"
+  printf '%s' "$OB_TOKEN" >"$T/home/.config/obsidian-headless/auth_token"
+}
+# Two vaults, one named and one given by ID, and the owner's encryption
+# password ready on standard input for each sync-setup.
+obsync() {
+  printf '%s\n%s\n' "$OB_PASSWORD" "$OB_PASSWORD" |
+    run REPOS= VAULTS="notes=Personal Notes; journal=id-journal" OBSIDIAN_SYNC_SETTLE_SECONDS=0 "$@" \
+      bash "$REPO/optional/obsidian-sync.sh" 2>&1
+}
+OB_UNIT="$T/home/.config/systemd/user/obsidian-sync@.service"
+leaks() { [[ $1 != *"$OB_TOKEN"* && $1 != *"$OB_PASSWORD"* ]]; }
+# name, each expected text, --, then NAME=value overrides. Passes only if the
+# script stops before linking anything or writing a unit.
+expect_ob_stop() {
+  local name=$1 out w wants=()
+  shift
+  while [ "$1" != -- ]; do
+    wants+=("$1")
+    shift
+  done
+  shift
+  if out=$(obsync "$@"); then
+    bad "$name: exited 0" "$out"
+    return
+  fi
+  for w in "${wants[@]}"; do
+    if [[ $out != *"$w"* ]]; then
+      bad "$name: no '$w' in the output" "$out"
+      return
+    fi
+  done
+  if grep -q '^ob sync-setup' "$LOG" || [ -e "$OB_UNIT" ]; then
+    bad "$name: linked a vault or wrote a unit before stopping" "$out"$'\n'"$(cat "$LOG")"
+  elif ! leaks "$out"; then
+    bad "$name: printed the sign-in token or a password" "$out"
+  else
+    ok "$name"
+  fi
+}
+
+ob_fixture
+rm "$T/home/.config/obsidian-headless/auth_token"
+expect_ob_stop "obsidian-sync.sh stops when Obsidian is signed out, naming ob login" \
+  "Obsidian is not signed in on this box. Owner's step: run ob login" -- STUB_OB_AUTH=out
+ob_fixture
+expect_ob_stop "obsidian-sync.sh stops when Obsidian refuses the stored sign-in, naming ob login" \
+  "Obsidian refused the stored sign-in, or couldn't be reached" "HTTP Error 401" "Owner's step: run ob login" -- STUB_OB_AUTH=refused
+ob_fixture
+expect_ob_stop "obsidian-sync.sh stops on a vault the account doesn't have, listing its vaults, shared ones included" \
+  "no remote vault in this Obsidian account has the ID or name 'Nope'" "!!   Personal Notes" "!!   Team" -- VAULTS="notes=Nope"
+ob_fixture
+expect_ob_stop "obsidian-sync.sh stops on a name two vaults share, listing their IDs" \
+  "'Shared Name' names more than one remote vault" "!!   id-dup1" "!!   id-dup2" "Put the ID" -- VAULTS="notes=Shared Name"
+ob_fixture
+expect_ob_stop "obsidian-sync.sh stops on two dirs that resolve to one vault" \
+  "VAULTS entries notes and again both name the remote vault Personal Notes (id-notes)" -- VAULTS="notes=Personal Notes; again=id-notes"
+ob_fixture
+expect_ob_stop "obsidian-sync.sh refuses a vault that is also a repo before 03-repos.sh has cloned it" \
+  "notes is in REPOS and VAULTS, and $T/home/Workspace/notes isn't cloned yet. Run 03-repos.sh first" -- REPOS="notes=org/notes"
+ob_fixture
+printf '%s' "$T/home/Workspace/notes" >"$T/ob/links/id-team"
+expect_ob_stop "obsidian-sync.sh stops on a dir linked to another vault, naming the unlink" \
+  "$T/home/Workspace/notes is linked to the remote vault Team (id-team), not Personal Notes (id-notes)" \
+  "ob sync-unlink --path $T/home/Workspace/notes" --
+ob_fixture
+printf '%s' "$T/home/Workspace/elsewhere" >"$T/ob/links/id-notes"
+expect_ob_stop "obsidian-sync.sh stops on a vault linked to another folder, naming the unit and the unlink that free it" \
+  "The remote vault Personal Notes (id-notes) is already linked to $T/home/Workspace/elsewhere" \
+  "systemctl --user disable --now obsidian-sync@elsewhere" "ob sync-unlink --path $T/home/Workspace/elsewhere" --
+ob_fixture
+expect_ob_stop "obsidian-sync.sh stops when lingering is off, naming 01-base.sh" "Run 01-base.sh as root" -- STUB_LINGER=no
+
+ob_fixture
+if ! out=$(run REPOS="app=org/app" VAULTS= bash "$REPO/optional/obsidian-sync.sh" 2>&1) || [[ $out != *"no vaults to sync"* ]] ||
+  grep -q '^ob \|^npm ' "$LOG"; then
+  bad "obsidian-sync.sh with VAULTS empty does nothing and exits 0" "$out"
+else
+  ok "obsidian-sync.sh with VAULTS empty does nothing and exits 0"
+fi
+
+ob_fixture
+rm "$T/ob/version"
+mkdir -p "$T/home/Workspace/notes/.git"
+first=$(obsync REPOS="notes=org/notes") && rc=0 || rc=$?
+setups=$(grep '^ob sync-setup' "$LOG" || true)
+if [ "$rc" -ne 0 ]; then
+  bad "obsidian-sync.sh first run: exited non-zero" "$first"
+elif ! grep -qx 'npm install -g obsidian-headless@0.0.14' "$LOG"; then
+  bad "obsidian-sync.sh first run installs the pinned client" "$(cat "$LOG")"
+elif [ "$setups" != "ob sync-setup --vault id-notes --path $T/home/Workspace/notes --device-name Cloud box"$'\n'"ob sync-setup --vault id-journal --path $T/home/Workspace/journal --device-name Cloud box" ]; then
+  bad "obsidian-sync.sh first run links each vault once, by its resolved ID" "$setups"
+elif [ ! -f "$OB_UNIT" ] || ! grep -qxF "ExecStart=/bin/bash -lc 'exec ob sync --continuous --path %h/Workspace/%i'" "$OB_UNIT"; then
+  bad "obsidian-sync.sh first run writes the unit" "$(cat "$OB_UNIT" 2>&1)"
+elif ! grep -qx 'systemctl --user restart obsidian-sync@notes.service' "$LOG" ||
+  ! grep -qx 'systemctl --user restart obsidian-sync@journal.service' "$LOG"; then
+  bad "obsidian-sync.sh first run starts each unit" "$(cat "$LOG")"
+elif [[ $first != *"notes ($T/home/Workspace/notes): Personal Notes, active"* || $first != *"journal ($T/home/Workspace/journal): Journal, active"* ]]; then
+  bad "obsidian-sync.sh first run ends naming each vault active" "$first"
+elif [[ $first != *"scp -r <vault on the laptop>/.claude agent@<box name>:Workspace/notes/"* ]]; then
+  bad "obsidian-sync.sh first run ends with the .claude copy line" "$first"
+elif ! leaks "$first"; then
+  bad "obsidian-sync.sh first run prints no sign-in token or password" "$first"
+else
+  ok "obsidian-sync.sh first run installs the client, links each vault once by ID and starts each unit"
+fi
+
+: >"$LOG"
+again=$(obsync REPOS="notes=org/notes") && rc=0 || rc=$?
+if [ "$rc" -ne 0 ] || grep -qE '^ob sync-setup|^npm install|^systemctl --user (re)?start' "$LOG" ||
+  [ "$(grep -c ': running, unchanged' <<<"$again")" != 2 ]; then
+  bad "obsidian-sync.sh run again with nothing changed links, installs and restarts nothing" "$again"$'\n'"$(cat "$LOG")"
+else
+  ok "obsidian-sync.sh run again with nothing changed links, installs and restarts nothing"
+fi
+
+: >"$LOG"
+echo 0.0.13 >"$T/ob/version"
+bumped=$(obsync REPOS="notes=org/notes") && rc=0 || rc=$?
+if [ "$rc" -ne 0 ] || ! grep -qx 'npm install -g obsidian-headless@0.0.14' "$LOG" || grep -q '^ob sync-setup' "$LOG" ||
+  ! grep -qx 'systemctl --user restart obsidian-sync@notes.service' "$LOG" ||
+  ! grep -qx 'systemctl --user restart obsidian-sync@journal.service' "$LOG"; then
+  bad "obsidian-sync.sh with the pin changed reinstalls and restarts every unit" "$bumped"$'\n'"$(cat "$LOG")"
+else
+  ok "obsidian-sync.sh with the pin changed reinstalls and restarts every unit"
+fi
+
+# Every unit reports active, so the new link is the only reason to restart one.
+: >"$LOG"
+added=$(obsync REPOS="notes=org/notes" VAULTS="notes=Personal Notes; journal=id-journal; team=Team" STUB_ACTIVE=yes) && rc=0 || rc=$?
+if [ "$rc" -ne 0 ] || [ "$(grep '^ob sync-setup' "$LOG")" != "ob sync-setup --vault id-team --path $T/home/Workspace/team --device-name Cloud box" ] ||
+  [ "$(grep '^systemctl --user restart' "$LOG")" != "systemctl --user restart obsidian-sync@team.service" ]; then
+  bad "obsidian-sync.sh links a vault added later, a shared one, and restarts only its unit" "$added"$'\n'"$(cat "$LOG")"
+else
+  ok "obsidian-sync.sh links a vault added later, a shared one, and restarts only its unit"
+fi
+
+: >"$LOG"
+echo "# edited by hand" >>"$OB_UNIT"
+fixed=$(obsync REPOS="notes=org/notes" STUB_RC_UNITS="obsidian-sync@team.service:active") && rc=0 || rc=$?
+if [ "$rc" -ne 0 ] || grep -q 'edited by hand' "$OB_UNIT" || grep -q '^ob sync-setup' "$LOG" ||
+  ! grep -qx 'systemctl --user restart obsidian-sync@notes.service' "$LOG" ||
+  ! grep -qx 'systemctl --user restart obsidian-sync@journal.service' "$LOG"; then
+  bad "obsidian-sync.sh puts back a changed unit file and restarts every unit" "$fixed"$'\n'"$(cat "$LOG")"
+else
+  ok "obsidian-sync.sh puts back a changed unit file and restarts every unit"
+fi
+if [[ $fixed == *"note: obsidian-sync@team is set up but not in VAULTS"*"systemctl --user disable --now obsidian-sync@team"* ]] &&
+  ! grep -q 'obsidian-sync@team' "$LOG"; then
+  ok "obsidian-sync.sh names, and leaves alone, a unit for a vault no longer in VAULTS"
+else
+  bad "obsidian-sync.sh names, and leaves alone, a unit for a vault no longer in VAULTS" "$fixed"$'\n'"$(cat "$LOG")"
 fi
 
 # ---- laptop/push.sh ----------------------------------------------------------
@@ -543,6 +833,32 @@ if [ -n "$(ls "$T/ssh" 2>/dev/null)" ]; then
   bad "push.sh sends nothing unless the answer is yes" "$out"
 else
   ok "push.sh sends nothing unless the answer is yes"
+fi
+
+# A PATH with every command run() offers except git, which /usr/bin and the
+# git stub would otherwise supply.
+mkdir -p "$T/nogit/bin" "$T/nogit/stubs"
+for f in /usr/bin/* /bin/*; do
+  case ${f##*/} in git | git-*) continue ;; esac
+  [ -e "$T/nogit/bin/${f##*/}" ] || ln -s "$f" "$T/nogit/bin/"
+done
+for f in "$STUBS"/*; do
+  [ "${f##*/}" = git ] || ln -s "$f" "$T/nogit/stubs/"
+done
+NOGIT_PATH="$T/nogit/stubs:$T/nogit/bin:/usr/sbin:/sbin"
+push_fixture
+if env -i PATH="$NOGIT_PATH" bash -c 'command -v git' >/dev/null; then
+  bad "push.sh without git: the test's PATH still finds git"
+elif ! out=$(printf 'yes\n' | run PATH="$NOGIT_PATH" bash "$REPO/laptop/push.sh" agent@box --connectors none 2>&1); then
+  bad "push.sh without git carries on: exited non-zero" "$out"
+elif [ -z "$(ssh_call_with tar)" ] || [ -z "$(ssh_call_with 04-connectors.sh)" ]; then
+  bad "push.sh without git still sends the config and connectors" "$out"
+elif [ -n "$(ssh_call_with 'git config')" ] || [[ $out == *"Test Owner"* ]]; then
+  bad "push.sh without git sends no identity" "$out"
+elif [[ $out != *"skipped: git is not installed on this laptop"* ]]; then
+  bad "push.sh without git says the identity is skipped" "$out"
+else
+  ok "push.sh without git carries on, says so and sends no identity"
 fi
 
 HEAD_SHA=$(git -C "$REPO" rev-parse HEAD)

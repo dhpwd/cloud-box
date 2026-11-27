@@ -27,7 +27,7 @@ CLOSE_LOCK="$CLOUD_BOX_RUN_DIR/close.lock"
 KEYS_LOCK="$CLOUD_BOX_RUN_DIR/keys.lock"
 GRANTS_FILE="$CLOUD_BOX_STATE_DIR/operator-grant"
 
-INPUT_NAMES="BOX_USER OPERATOR_PUBKEY REPOS RC_REPOS RC_SPAWN RC_CAPACITY"
+INPUT_NAMES="BOX_USER OPERATOR_PUBKEY REPOS VAULTS RC_REPOS RC_SPAWN RC_CAPACITY"
 
 die() {
   printf '!! %s\n' "$*" >&2
@@ -59,8 +59,32 @@ load_box_env() {
   done <"$BOX_ENV_FILE"
 }
 
-# Sets REPO_DIRS and REPO_SLUGS from REPOS, and RC_DIRS and RC_AGENTS from
-# RC_REPOS, as parallel arrays.
+# Refuses a local directory under ~/Workspace that isn't one plain name, or
+# that an earlier entry of the same input already uses.
+check_local_dir() {
+  local input=$1 entry=$2 dir=$3
+  shift 3
+  case $dir in
+    '') die "$input entry '$entry': the local directory is empty" ;;
+    .) die "$input entry '$entry': the local directory is '.', which would be ~/Workspace itself" ;;
+    /*) die "$input entry '$entry': the local directory is an absolute path" ;;
+    */*) die "$input entry '$entry': the local directory contains '/'" ;;
+    *..*) die "$input entry '$entry': the local directory contains '..'" ;;
+  esac
+  [[ $dir =~ ^[A-Za-z0-9._-]+$ ]] || die "$input entry '$entry': use only letters, digits, '.', '_' and '-' in the local directory"
+  if in_list "$dir" "$@"; then
+    die "$input entry '$entry': the local directory '$dir' is repeated"
+  fi
+}
+
+trim() {
+  local s=$1
+  s=${s#"${s%%[![:space:]]*}"}
+  printf '%s' "${s%"${s##*[![:space:]]}"}"
+}
+
+# Sets REPO_DIRS and REPO_SLUGS from REPOS, VAULT_DIRS and VAULT_REMOTES from
+# VAULTS, and RC_DIRS and RC_AGENTS from RC_REPOS, as parallel arrays.
 read_inputs() {
   load_box_env
   local where="set it in $BOX_ENV_FILE (box.env.example shows the format)"
@@ -74,7 +98,7 @@ read_inputs() {
   printf '%s\n' "$OPERATOR_PUBKEY" | ssh-keygen -l -f - >/dev/null 2>&1 ||
     die "OPERATOR_PUBKEY is not a valid SSH public key (is the example's placeholder still in place?)"
 
-  local entries entry dir slug agent
+  local entries entry dir slug remote agent i
   REPO_DIRS=()
   REPO_SLUGS=()
   read -r -a entries <<<"${REPOS:-}"
@@ -82,35 +106,48 @@ read_inputs() {
     dir=${entry%%=*}
     slug=${entry#*=}
     [ "$dir" != "$entry" ] || die "REPOS entry '$entry' is not <local dir>=<github owner/repo>"
-    case $dir in
-      '') die "REPOS entry '$entry': the local directory is empty" ;;
-      .) die "REPOS entry '$entry': the local directory is '.', which would be ~/Workspace itself" ;;
-      /*) die "REPOS entry '$entry': the local directory is an absolute path" ;;
-      */*) die "REPOS entry '$entry': the local directory contains '/'" ;;
-      *..*) die "REPOS entry '$entry': the local directory contains '..'" ;;
-    esac
-    [[ $dir =~ ^[A-Za-z0-9._-]+$ ]] || die "REPOS entry '$entry': use only letters, digits, '.', '_' and '-' in the local directory"
-    if in_list "$dir" ${REPO_DIRS[@]+"${REPO_DIRS[@]}"}; then
-      die "REPOS entry '$entry': the local directory '$dir' is repeated"
-    fi
+    check_local_dir REPOS "$entry" "$dir" ${REPO_DIRS[@]+"${REPO_DIRS[@]}"}
     [[ $slug =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "REPOS entry '$entry': '$slug' is not <github owner>/<repo>"
     REPO_DIRS+=("$dir")
     REPO_SLUGS+=("$slug")
   done
-  [ ${#REPO_DIRS[@]} -gt 0 ] || die "REPOS is missing: $where"
+
+  # Separated by ';', because a remote vault's name can hold spaces.
+  VAULT_DIRS=()
+  VAULT_REMOTES=()
+  IFS=';' read -r -a entries <<<"${VAULTS:-}"
+  for entry in ${entries[@]+"${entries[@]}"}; do
+    entry=$(trim "$entry")
+    [ -n "$entry" ] || continue
+    [[ $entry == *=* ]] || die "VAULTS entry '$entry' is not <local dir>=<remote vault name or ID>"
+    dir=$(trim "${entry%%=*}")
+    remote=$(trim "${entry#*=}")
+    check_local_dir VAULTS "$entry" "$dir" ${VAULT_DIRS[@]+"${VAULT_DIRS[@]}"}
+    [ -n "$remote" ] || die "VAULTS entry '$entry': the remote vault is empty"
+    if in_list "$remote" ${VAULT_REMOTES[@]+"${VAULT_REMOTES[@]}"}; then
+      die "VAULTS entry '$entry': the remote vault '$remote' is named twice"
+    fi
+    VAULT_DIRS+=("$dir")
+    VAULT_REMOTES+=("$remote")
+  done
+  [ ${#REPO_DIRS[@]} -gt 0 ] || [ ${#VAULT_DIRS[@]} -gt 0 ] || die "REPOS and VAULTS are both empty: $where"
 
   RC_DIRS=()
   RC_AGENTS=()
   if [ -n "${RC_REPOS:-}" ]; then
     read -r -a entries <<<"$RC_REPOS"
   else
-    entries=("${REPO_DIRS[@]}")
+    entries=(${REPO_DIRS[@]+"${REPO_DIRS[@]}"})
+    for dir in ${VAULT_DIRS[@]+"${VAULT_DIRS[@]}"}; do
+      in_list "$dir" ${REPO_DIRS[@]+"${REPO_DIRS[@]}"} || entries+=("$dir")
+    done
   fi
   for entry in "${entries[@]}"; do
     dir=${entry%%:*}
     agent=
     [ "$dir" = "$entry" ] || agent=${entry#*:}
-    in_list "$dir" "${REPO_DIRS[@]}" || die "RC_REPOS entry '$entry': '$dir' is not a local directory in REPOS"
+    in_list "$dir" ${REPO_DIRS[@]+"${REPO_DIRS[@]}"} ${VAULT_DIRS[@]+"${VAULT_DIRS[@]}"} ||
+      die "RC_REPOS entry '$entry': '$dir' is not a local directory in REPOS or VAULTS"
     if in_list "$dir" ${RC_DIRS[@]+"${RC_DIRS[@]}"}; then
       die "RC_REPOS entry '$entry': '$dir' is repeated"
     fi
@@ -124,6 +161,13 @@ read_inputs() {
     same-dir | worktree) ;;
     *) die "RC_SPAWN=$RC_SPAWN: use same-dir or worktree" ;;
   esac
+  if [ "$RC_SPAWN" = worktree ]; then
+    for i in "${!RC_DIRS[@]}"; do
+      dir=${RC_DIRS[$i]}
+      in_list "$dir" ${REPO_DIRS[@]+"${REPO_DIRS[@]}"} && continue
+      die "RC_SPAWN=worktree: the Remote Control entry '$dir${RC_AGENTS[$i]:+:${RC_AGENTS[$i]}}' is a vault with no git repository, and worktree mode needs a git repository. Use RC_SPAWN=same-dir, or leave $dir out of RC_REPOS"
+    done
+  fi
   RC_CAPACITY=${RC_CAPACITY:-}
   [ -z "$RC_CAPACITY" ] || [[ $RC_CAPACITY =~ ^[1-9][0-9]*$ ]] || die "RC_CAPACITY=$RC_CAPACITY: use a whole number from 1, or leave it unset"
 }
