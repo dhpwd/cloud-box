@@ -115,6 +115,7 @@ read_inputs() {
   done
 
   # Separated by ';', because a remote vault's name can hold spaces.
+  case ${VAULTS:-} in *$'\n'*) die "VAULTS must be on one line, its entries separated by ';'" ;; esac
   VAULT_DIRS=()
   VAULT_REMOTES=()
   IFS=';' read -r -a entries <<<"${VAULTS:-}"

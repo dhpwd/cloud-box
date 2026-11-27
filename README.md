@@ -51,7 +51,7 @@ This is the order when I build a box for someone else. "Root" and "box user" are
 | ---- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 1    | Operator, root                                                                               | Clone this repo to `/opt/cloud-box`, write `box.env`, run `01-base.sh`. Public SSH is key-only from here, before anything of the owner's reaches the box                                                                         |
 | 2    | Operator, root, then owner                                                                   | `02-tailscale-lockdown.sh up`. The owner signs in to Tailscale and proves two routes in: their laptop to the box user over the tailnet, and root in the provider's web console                                                   |
-| 3    | Owner, box user                                                                              | Claude sign-in and GitHub sign-in                                                                                                                                                                                                |
+| 3    | Owner, box user                                                                              | Claude sign-in, and GitHub sign-in when there are repos                                                                                                                                                                          |
 | 4    | Operator, box user. On the Obsidian route, then the owner's box-user session on their laptop | `03-repos.sh` clones the repos and installs their dependencies. On the Obsidian route, `optional/obsidian-sync.sh` installs Obsidian's client, stops for the owner's Obsidian sign-in, then links each vault and starts its sync |
 | 5    | Owner's laptop                                                                               | `laptop/push.sh` copies the Claude Code config, the chosen connectors and the git identity. Then the copy lines for env files, folders with no remote and each vault's `.claude` folder                                          |
 | 6    | Owner, then operator, box user                                                               | Connector sign-ins. Then the trust step for each repo and vault                                                                                                                                                                  |
@@ -135,7 +135,9 @@ ob login                                    # the owner, with the screen share p
 
 The Obsidian sign-in is here and not with step 3's because the client isn't on the box until the script installs it. `ob login` asks for the owner's Obsidian email, password and any 2FA code. On the second run, a vault with end-to-end encryption asks for its encryption password, which the owner types with the share paused. A vault with standard encryption asks for nothing.
 
-The script links each vault in `VAULTS` to its remote vault once, under the device name "Cloud box", creating `~/Workspace/<vault dir>` if it isn't there. It then starts a systemd user unit, `obsidian-sync@<vault dir>.service`, which keeps the folder in two-way sync and comes back after a reboot, and checks each one stayed up. If one didn't, it names the cause it can see in the journal: the sign-in, the Sync subscription, a remote vault that no longer exists, a missing encryption key or a second sync of the same vault. It stops before linking anything, naming the fix, for a vault name the account doesn't have, a name two vaults share (it lists their IDs: put the right one in `VAULTS`), two entries that are the same vault, a vault or folder already linked elsewhere, and a vault dir in `REPOS` that `03-repos.sh` hasn't cloned yet. It never unlinks anything itself. Run again, it restarts only what changed, and a new pin in the script reinstalls the client and restarts every sync. More in [Obsidian vaults](#obsidian-vaults).
+The script links each vault in `VAULTS` to its remote vault once, under the device name "Cloud box", creating `~/Workspace/<vault dir>` if it isn't there. It then starts a systemd user unit, `obsidian-sync@<vault dir>.service`, which keeps the folder in two-way sync and comes back after a reboot, and checks each one stayed up. If one didn't, it names the cause it can see in the journal: the Sync subscription, a remote vault that no longer exists, a missing encryption key, a second sync of the same vault or the sign-in. It stops before linking anything, naming the fix, for a vault name the account doesn't have, a name two vaults share (it lists their IDs: put the right one in `VAULTS`), two entries that are the same vault, a vault or folder already linked elsewhere, and a vault dir in `REPOS` that `03-repos.sh` hasn't cloned yet. It never unlinks anything itself. Run again, it restarts only what changed: a new link, a new pin in the script (which reinstalls the client), a changed unit file, a sync that isn't running, and a sync that started before the owner last signed in to Obsidian. A run that stops part-way leaves those restarts to the next run.
+
+If Obsidian refuses the stored sign-in, `ob login` stops on it before asking for anything, so the owner runs `ob logout` first and then `ob login`. More in [Obsidian vaults](#obsidian-vaults).
 
 ### 5. Config, connectors and files (owner's laptop)
 
@@ -159,7 +161,7 @@ It needs `ssh` and `python3` on the laptop, and `git` only to copy the git ident
 
 **What is not copied:** the Claude sign-in, `~/.claude.json` (only the chosen connectors' definitions cross), session history and auto memory (`~/.claude/projects`), plugins, shell and Claude history, anything under `~/.ssh`, servers registered for one project, env files and folders with no git remote. Connectors added in claude.ai follow the Claude sign-in and need nothing copied.
 
-**The copy lines,** from the laptop, for env files, folders with no git remote and each vault's `.claude` folder. They are copied once, at setup:
+**The copy lines,** from the laptop, for env files, folders with no git remote that aren't vaults in `VAULTS`, and each vault's `.claude` folder. They are copied once, at setup:
 
 ```bash
 scp <file on the laptop> <box user>@<box name>:Workspace/<repo>/<path in the repo>
@@ -167,7 +169,7 @@ scp -r <folder on the laptop> <box user>@<box name>:<where it goes, such as Work
 scp -r <vault on the laptop>/.claude <box user>@<box name>:Workspace/<vault dir>/
 ```
 
-The last one is for the Obsidian route, after `optional/obsidian-sync.sh` has created the vault's folder: Obsidian Sync doesn't carry `.claude`, so it lives only on the box from then on.
+The last one is for the Obsidian route, after `optional/obsidian-sync.sh` has created the vault's folder: Obsidian Sync doesn't carry `.claude`, so it lives only on the box from then on. Never copy a whole vault folder with the second line. Sync already carries its notes, and a copy over the synced folder can overwrite newer notes, which Sync then sends back to the remote vault.
 
 ### 6. Connector sign-ins and the trust step (box user)
 
@@ -268,7 +270,7 @@ One rule wherever a setup stops: if the owner's laptop has reached the box over 
 
 - **After step 1:** public SSH is key-only, the operator's key is on the box user, and nothing of the owner's is on the box
 - **After step 2:** Tailscale is up on the owner's tailnet, and public SSH is still open, key-only, unless the close has been run
-- **After step 3:** the owner's Claude and GitHub sign-ins are on the box
+- **After step 3:** the owner's Claude sign-in, and GitHub's when there are repos, are on the box
 - **After step 4:** the repos are cloned. A repo left at `--clone-only` has no dependencies yet: run `03-repos.sh` again once its env file is in place. On the Obsidian route, `optional/obsidian-sync.sh` stops for the owner's `ob login` and names any vault it can't link. Run it again once that's fixed: a vault already linked is left linked, and its sync is restarted only if something changed
 - **After step 5:** the config, connectors and git identity are on the box. Running `push.sh` again overwrites files of the same name and leaves registered connectors alone
 - **After steps 6 and 7:** any repo whose trust step was missed has no running server. `05-remote-control.sh` names it, and running it again after the trust step starts it
@@ -291,7 +293,7 @@ After the handover, someone helping the owner has no access of their own. The ow
 | ---------------------------------------- | ------------------------------------------------ | -------------------------------------------------------------------- |
 | `scripts/01-base.sh`                     | root                                             | `box.env`                                                            |
 | `scripts/02-tailscale-lockdown.sh up`    | root                                             | –                                                                    |
-| `scripts/03-repos.sh`                    | box user                                         | GitHub sign-in                                                       |
+| `scripts/03-repos.sh`                    | box user                                         | GitHub sign-in, when `REPOS` is set                                  |
 | `optional/obsidian-sync.sh`              | box user, in the owner's session on their laptop | `03-repos.sh`. It stops for the owner's `ob login` when it is needed |
 | `laptop/push.sh`                         | the owner's laptop                               | Tailscale on the laptop                                              |
 | `scripts/04-connectors.sh`               | box user                                         | run by `push.sh`                                                     |
@@ -299,7 +301,7 @@ After the handover, someone helping the owner has no access of their own. The ow
 | `scripts/02-tailscale-lockdown.sh close` | root                                             | the owner's laptop connected over the tailnet                        |
 | `scripts/06-handover.sh`                 | root                                             | a confirmed close                                                    |
 
-`scripts/lib.sh` is sourced by the others: it reads and checks the inputs. `tests/run.sh` tests the checks, the laptop script and the key and lockdown handling without root, network or a server.
+`scripts/lib.sh` is sourced by the others: it reads and checks the inputs. `tests/run.sh` tests the checks, the laptop script, the vault script and the key and lockdown handling without root, network or a server.
 
 ## Optional scripts
 
@@ -312,7 +314,7 @@ Not part of a standard setup.
   /opt/cloud-box/optional/playwright-mcp.sh     # then as the box user
   ```
 
-- `optional/terminal.sh` – the terminal route: mosh, tmux 3.7 with a session per repo, and the shell helpers. As root first (packages and the tmux build), then as the box user:
+- `optional/terminal.sh` – the terminal route: mosh, tmux 3.7 with a session per repo and vault, and the shell helpers. As root first (packages and the tmux build), then as the box user:
 
   ```bash
   /opt/cloud-box/optional/terminal.sh     # as root
@@ -344,6 +346,8 @@ systemctl --user disable --now obsidian-sync@<vault dir>   # stop the sync
 ob sync-unlink --path ~/Workspace/<vault dir>              # then remove the link and its stored key
 ob logout                                                  # sign the box out of Obsidian
 ```
+
+**A sign-in Obsidian refuses after setup** doesn't stop a sync: `ob` keeps retrying, `systemctl` still shows the unit active, and its journal shows "Failed to authenticate". The fix is `ob logout`, `ob login`, then `optional/obsidian-sync.sh` again, which restarts every sync that started before the new sign-in.
 
 **Putting back a note an agent changed:** Obsidian Sync's version history, where the box's edits show under the device name "Cloud box".
 

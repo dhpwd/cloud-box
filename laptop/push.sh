@@ -433,11 +433,13 @@ fi
 case $CONNECTORS in none | "") CHOSEN= ;; *) CHOSEN=$CONNECTORS ;; esac
 
 # git is used only to read the identity, so a laptop without it, such as one
-# whose work is all in an Obsidian vault, sends the rest.
+# whose work is all in an Obsidian vault, sends the rest. On a Mac without
+# Apple's command line tools, git is a stub like python3's, so running it is
+# the test.
 GIT_NAME=
 GIT_EMAIL=
 NO_GIT=
-if command -v git >/dev/null; then
+if git --version >/dev/null 2>&1; then
   GIT_NAME=$(git config --global --includes user.name || true)
   GIT_EMAIL=$(git config --global --includes user.email || true)
 else

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Optional – the terminal route: mosh, tmux with a session per repo, a kill
+# Optional – the terminal route: mosh, tmux with a session per repo and vault, a kill
 # switch and the shell helpers. Not part of a standard setup. Two parts, each
 # run from this checkout:
 #   as root:          optional/terminal.sh   # packages, and tmux 3.7 from source

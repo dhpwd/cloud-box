@@ -40,7 +40,8 @@ stub() {
   chmod +x "$STUBS/$1"
 }
 
-for c in apt apt-get bun pnpm pre-commit journalctl scp logger; do stub "$c"; done
+for c in apt apt-get bun pnpm pre-commit scp logger; do stub "$c"; done
+stub journalctl 'printf "%s\n" "${STUB_JOURNAL:-}"'
 # An install of obsidian-headless leaves the ob stub reporting its version.
 stub npm 'case "$1 $2" in "install -g") mkdir -p "$STUB_DIR/ob"; echo "${3#obsidian-headless@}" >"$STUB_DIR/ob/version" ;; esac'
 # Obsidian's headless client. Remote vaults come from $STUB_DIR/ob-remote.json,
@@ -52,10 +53,11 @@ stub ob 'st="$STUB_DIR/ob"; mkdir -p "$st/links"
 case $1 in
   --version) if [ -f "$st/version" ]; then cat "$st/version"; else echo "ob: command not found" >&2; exit 127; fi ;;
   sync-list-remote)
-    case ${STUB_OB_AUTH:-in} in
-      out) echo "No account logged in. Run \"ob login\" first." >&2; exit 2 ;;
-      refused) echo "Failed to list vaults: Error: HTTP Error 401" >&2; exit 1 ;;
-    esac
+    # Signed in through the stored token or, ahead of it, OBSIDIAN_AUTH_TOKEN.
+    if [ -z "${OBSIDIAN_AUTH_TOKEN:-}" ] && [ ! -f "$HOME/.config/obsidian-headless/auth_token" ]; then
+      echo "No account logged in. Run \"ob login\" first." >&2; exit 2
+    fi
+    [ -z "${STUB_OB_REFUSED:-}" ] || { echo "Failed to list vaults: Error: HTTP Error 401" >&2; exit 1; }
     cat "$STUB_DIR/ob-remote.json" ;;
   sync-list-local)
     sep=; printf "{\"vaults\":["
@@ -99,11 +101,13 @@ stub ip6tables 'echo "-P INPUT DROP"'
 stub id 'case $1 in -u) echo "${STUB_UID:-1000}" ;; -un) echo "${STUB_USER:-agent}" ;; *) exec /usr/bin/id "$@" ;; esac'
 stub runuser 'while [ "$1" != -- ]; do shift; done; shift; exec "$@"'
 stub loginctl 'echo "${STUB_LINGER:-yes}"'
-# A unit started or restarted is active from then on.
+# A unit started or restarted is active from then on, unless STUB_DOWN is set.
+# A unit reports it became active at STUB_STARTED_AT, or now.
 stub systemctl 'u=${!#}
 case " $* " in
-  *" is-active "*) [ "${STUB_ACTIVE:-no}" = yes ] || [ -e "$STUB_DIR/active/$u" ] ;;
+  *" is-active "*) [ -z "${STUB_DOWN:-}" ] && { [ "${STUB_ACTIVE:-no}" = yes ] || [ -e "$STUB_DIR/active/$u" ]; } ;;
   *" start "* | *" restart "*) mkdir -p "$STUB_DIR/active"; touch "$STUB_DIR/active/$u" ;;
+  *" show "*ActiveEnterTimestamp*) echo "@${STUB_STARTED_AT:-$(date +%s)}" ;;
   *" show "*) echo 4242 ;;
   *list-units*)
     for e in ${STUB_RC_UNITS:-}; do
@@ -241,6 +245,7 @@ vault_refusal "with '..' in the local directory" "VAULTS entry '..=Notes': the l
 vault_refusal "with other characters in the local directory" "VAULTS entry 'my notes=Notes': use only letters, digits" "my notes=Notes"
 vault_refusal "repeating a local directory" "VAULTS entry 'notes=Other': the local directory 'notes' is repeated" "notes=Notes; notes=Other"
 vault_refusal "naming a remote vault twice" "VAULTS entry 'b = My Notes': the remote vault 'My Notes' is named twice" "a=My Notes; b = My Notes"
+vault_refusal "list over two lines" "VAULTS must be on one line" $'notes=Notes;\njournal=Journal'
 expect_refusal "RC_SPAWN=worktree is refused for a vault without git" \
   "RC_SPAWN=worktree: the Remote Control entry 'notes' is a vault with no git repository, and worktree mode needs a git repository" \
   REPOS="app=org/app" VAULTS="notes=Notes" RC_SPAWN=worktree bash "$REPO/scripts/03-repos.sh"
@@ -431,6 +436,7 @@ fi
 
 # ---- optional/obsidian-sync.sh -----------------------------------------------
 
+OB_PIN=$(sed -n 's/^OBSIDIAN_HEADLESS_VERSION=//p' "$REPO/optional/obsidian-sync.sh")
 OB_TOKEN=OBTOKENSENTINEL555
 OB_PASSWORD=OBPASSWORDSENTINEL666
 cat >"$T/ob-remote.json" <<'JSON'
@@ -444,7 +450,7 @@ JSON
 ob_fixture() {
   fresh_home
   mkdir -p "$T/ob/links" "$T/home/.config/obsidian-headless"
-  echo 0.0.14 >"$T/ob/version"
+  echo "$OB_PIN" >"$T/ob/version"
   printf '%s' "$OB_TOKEN" >"$T/home/.config/obsidian-headless/auth_token"
 }
 # Two vaults, one named and one given by ID, and the owner's encryption
@@ -492,41 +498,66 @@ expect_ob_stop() {
 ob_fixture
 rm "$T/home/.config/obsidian-headless/auth_token"
 expect_ob_stop "obsidian-sync.sh stops when Obsidian is signed out, naming ob login" \
-  "Obsidian is not signed in on this box. Owner's step: run ob login" -- STUB_OB_AUTH=out
+  "Obsidian is not signed in on this box. Owner's step: run ob login" --
 ob_fixture
-expect_ob_stop "obsidian-sync.sh stops when Obsidian refuses the stored sign-in, naming ob login" \
-  "Obsidian refused the stored sign-in, or couldn't be reached" "HTTP Error 401" "Owner's step: run ob login" -- STUB_OB_AUTH=refused
+rm "$T/home/.config/obsidian-headless/auth_token"
+expect_ob_stop "obsidian-sync.sh checks the stored sign-in the units use, not OBSIDIAN_AUTH_TOKEN" \
+  "Obsidian is not signed in on this box" -- OBSIDIAN_AUTH_TOKEN=from-the-session
+ob_fixture
+expect_ob_stop "obsidian-sync.sh stops when Obsidian refuses the stored sign-in, naming ob logout and ob login" \
+  "Obsidian refused the stored sign-in, or couldn't be reached" "HTTP Error 401" \
+  "After a refusal, the owner runs ob logout first, then ob login" "Owner's step: run ob login" -- STUB_OB_REFUSED=1
 ob_fixture
 expect_ob_stop "obsidian-sync.sh stops on a vault the account doesn't have, listing its vaults, shared ones included" \
   "no remote vault in this Obsidian account has the ID or name 'Nope'" "!!   Personal Notes" "!!   Team" -- VAULTS="notes=Nope"
 ob_fixture
-expect_ob_stop "obsidian-sync.sh stops on a name two vaults share, listing their IDs" \
-  "'Shared Name' names more than one remote vault" "!!   id-dup1" "!!   id-dup2" "Put the ID" -- VAULTS="notes=Shared Name"
+expect_ob_stop "obsidian-sync.sh stops on a name two vaults share, listing their IDs and whose each is" \
+  "'Shared Name' names more than one remote vault" "!!   id-dup1  (yours, region eu)" \
+  "!!   id-dup2  (shared with you, region us)" "Put the ID" -- VAULTS="notes=Shared Name"
 ob_fixture
 expect_ob_stop "obsidian-sync.sh stops on two dirs that resolve to one vault" \
   "VAULTS entries notes and again both name the remote vault Personal Notes (id-notes)" -- VAULTS="notes=Personal Notes; again=id-notes"
+# The later entry's folder holds the link, so the link checks alone would send
+# the owner to free it.
+ob_fixture
+printf '%s' "$T/home/Workspace/again" >"$T/ob/links/id-notes"
+expect_ob_stop "obsidian-sync.sh names two entries for one vault before any link the second one holds" \
+  "VAULTS entries notes and again both name the remote vault Personal Notes (id-notes)" \
+  "It is linked to $T/home/Workspace/again now" -- VAULTS="notes=Personal Notes; again=id-notes"
 ob_fixture
 expect_ob_stop "obsidian-sync.sh refuses a vault that is also a repo before 03-repos.sh has cloned it" \
   "notes is in REPOS and VAULTS, and $T/home/Workspace/notes isn't cloned yet. Run 03-repos.sh first" -- REPOS="notes=org/notes"
 ob_fixture
 printf '%s' "$T/home/Workspace/notes" >"$T/ob/links/id-team"
-expect_ob_stop "obsidian-sync.sh stops on a dir linked to another vault, naming the unlink" \
+expect_ob_stop "obsidian-sync.sh stops on a dir linked to another vault, naming the unlink and the merge it would make" \
   "$T/home/Workspace/notes is linked to the remote vault Team (id-team), not Personal Notes (id-notes)" \
-  "ob sync-unlink --path $T/home/Workspace/notes" --
+  "ob sync-unlink --path $T/home/Workspace/notes" "linking it merges them into Personal Notes" \
+  "mv $T/home/Workspace/notes $T/home/Workspace/notes.old" --
 ob_fixture
 printf '%s' "$T/home/Workspace/elsewhere" >"$T/ob/links/id-notes"
 expect_ob_stop "obsidian-sync.sh stops on a vault linked to another folder, naming the unit and the unlink that free it" \
   "The remote vault Personal Notes (id-notes) is already linked to $T/home/Workspace/elsewhere" \
   "systemctl --user disable --now obsidian-sync@elsewhere" "ob sync-unlink --path $T/home/Workspace/elsewhere" --
 ob_fixture
+printf '%s' "$T/home/Workspace/My Vault" >"$T/ob/links/id-notes"
+expect_ob_stop "obsidian-sync.sh quotes a linked folder's path in the unlink it names" \
+  "ob sync-unlink --path $T/home/Workspace/My\ Vault" --
+if [[ $(obsync) == *"obsidian-sync@My"* ]]; then
+  bad "obsidian-sync.sh names no unit for a folder no VAULTS entry could name"
+else
+  ok "obsidian-sync.sh names no unit for a folder no VAULTS entry could name"
+fi
+ob_fixture
 expect_ob_stop "obsidian-sync.sh stops when lingering is off, naming 01-base.sh" "Run 01-base.sh as root" -- STUB_LINGER=no
 
 ob_fixture
-if ! out=$(run REPOS="app=org/app" VAULTS= bash "$REPO/optional/obsidian-sync.sh" 2>&1) || [[ $out != *"no vaults to sync"* ]] ||
-  grep -q '^ob \|^npm ' "$LOG"; then
+if ! out=$(run REPOS="app=org/app" VAULTS= STUB_RC_UNITS="obsidian-sync@old.service:active" bash "$REPO/optional/obsidian-sync.sh" 2>&1) ||
+  [[ $out != *"no vaults to sync"* ]] || grep -q '^ob \|^npm ' "$LOG"; then
   bad "obsidian-sync.sh with VAULTS empty does nothing and exits 0" "$out"
+elif [[ $out != *"note: obsidian-sync@old is set up but not in VAULTS"*"systemctl --user disable --now obsidian-sync@old"* ]]; then
+  bad "obsidian-sync.sh with VAULTS empty still names a sync left running" "$out"
 else
-  ok "obsidian-sync.sh with VAULTS empty does nothing and exits 0"
+  ok "obsidian-sync.sh with VAULTS empty does nothing but name a sync left running"
 fi
 
 ob_fixture
@@ -536,7 +567,7 @@ first=$(obsync REPOS="notes=org/notes") && rc=0 || rc=$?
 setups=$(grep '^ob sync-setup' "$LOG" || true)
 if [ "$rc" -ne 0 ]; then
   bad "obsidian-sync.sh first run: exited non-zero" "$first"
-elif ! grep -qx 'npm install -g obsidian-headless@0.0.14' "$LOG"; then
+elif ! grep -qx "npm install -g obsidian-headless@$OB_PIN" "$LOG"; then
   bad "obsidian-sync.sh first run installs the pinned client" "$(cat "$LOG")"
 elif [ "$setups" != "ob sync-setup --vault id-notes --path $T/home/Workspace/notes --device-name Cloud box"$'\n'"ob sync-setup --vault id-journal --path $T/home/Workspace/journal --device-name Cloud box" ]; then
   bad "obsidian-sync.sh first run links each vault once, by its resolved ID" "$setups"
@@ -564,13 +595,34 @@ else
 fi
 
 : >"$LOG"
-echo 0.0.13 >"$T/ob/version"
+echo 0.0.0-older >"$T/ob/version"
 bumped=$(obsync REPOS="notes=org/notes") && rc=0 || rc=$?
-if [ "$rc" -ne 0 ] || ! grep -qx 'npm install -g obsidian-headless@0.0.14' "$LOG" || grep -q '^ob sync-setup' "$LOG" ||
+if [ "$rc" -ne 0 ] || ! grep -qx "npm install -g obsidian-headless@$OB_PIN" "$LOG" || grep -q '^ob sync-setup' "$LOG" ||
   ! restarted_each_vault; then
   bad "obsidian-sync.sh with the pin changed reinstalls and restarts every unit" "$bumped"$'\n'"$(cat "$LOG")"
 else
   ok "obsidian-sync.sh with the pin changed reinstalls and restarts every unit"
+fi
+
+# The install happens, then the sign-in check stops the run before any
+# restart. The next run still owes every unit a restart.
+: >"$LOG"
+echo 0.0.0-older >"$T/ob/version"
+obsync REPOS="notes=org/notes" STUB_OB_REFUSED=1 >/dev/null || true
+: >"$LOG"
+resumed=$(obsync REPOS="notes=org/notes") && rc=0 || rc=$?
+if [ "$rc" -ne 0 ] || grep -q '^npm install' "$LOG" || ! restarted_each_vault; then
+  bad "obsidian-sync.sh restarts every unit on the run after one that installed the client and stopped" "$resumed"$'\n'"$(cat "$LOG")"
+else
+  ok "obsidian-sync.sh restarts every unit on the run after one that installed the client and stopped"
+fi
+
+: >"$LOG"
+signed=$(obsync REPOS="notes=org/notes" STUB_STARTED_AT=1) && rc=0 || rc=$?
+if [ "$rc" -ne 0 ] || ! restarted_each_vault || [[ $signed != *"the owner signed in to Obsidian since it started"* ]]; then
+  bad "obsidian-sync.sh restarts each running sync that started before the latest Obsidian sign-in" "$signed"$'\n'"$(cat "$LOG")"
+else
+  ok "obsidian-sync.sh restarts each running sync that started before the latest Obsidian sign-in"
 fi
 
 # Every unit reports active, so the new link is the only reason to restart one.
@@ -584,6 +636,7 @@ else
 fi
 
 : >"$LOG"
+mkdir -p "$(dirname "$OB_UNIT")"
 echo "# edited by hand" >>"$OB_UNIT"
 fixed=$(obsync REPOS="notes=org/notes" STUB_RC_UNITS="obsidian-sync@team.service:active") && rc=0 || rc=$?
 if [ "$rc" -ne 0 ] || grep -q 'edited by hand' "$OB_UNIT" || grep -q '^ob sync-setup' "$LOG" ||
@@ -598,6 +651,26 @@ if [[ $fixed == *"note: obsidian-sync@team is set up but not in VAULTS"*"systemc
 else
   bad "obsidian-sync.sh names, and leaves alone, a unit for a vault no longer in VAULTS" "$fixed"$'\n'"$(cat "$LOG")"
 fi
+
+# A unit that is down after the wait: ob puts the subscription and a deleted
+# vault behind its sign-in error, so each is named by its own cause.
+ob_down() { # name, journal, expected text
+  ob_fixture
+  local out
+  if out=$(obsync STUB_DOWN=1 STUB_JOURNAL="$2"); then
+    bad "$1: exited 0" "$out"
+  elif [[ $out != *"!! notes: not active"* || $out != *"$3"* ]]; then
+    bad "$1" "$out"
+  else
+    ok "$1"
+  fi
+}
+ob_down "obsidian-sync.sh names an expired Sync subscription, not the sign-in" \
+  "Failed to authenticate: Your subscription to Obsidian Sync has expired" "the Obsidian Sync subscription has expired"
+ob_down "obsidian-sync.sh names a deleted remote vault, not the sign-in" \
+  $'Failed to authenticate: Vault not found\nThe connected remote vault no longer exists.' "was deleted or renamed in Obsidian Sync"
+ob_down "obsidian-sync.sh names a refused sign-in with ob logout and ob login" \
+  "Failed to authenticate: Invalid token" "After a refusal, the owner runs ob logout first, then ob login"
 
 # ---- optional/terminal.sh with vaults ----------------------------------------
 
