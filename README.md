@@ -47,18 +47,18 @@ Every script on the box checks the inputs before it does anything and stops, nam
 
 This is the order when I build a box for someone else. "Root" and "box user" are SSH sessions on the box: the operator opens them over public SSH with their key until the close.
 
-| Step | Who and where                                                                                | What                                                                                                                                                                                                                             |
-| ---- | -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1    | Operator, root                                                                               | Clone this repo to `/opt/cloud-box`, write `box.env`, run `01-base.sh`. Public SSH is key-only from here, before anything of the owner's reaches the box                                                                         |
-| 2    | Operator, root, then owner                                                                   | `02-tailscale-lockdown.sh up`. The owner signs in to Tailscale and proves two routes in: their laptop to the box user over the tailnet, and root in the provider's web console                                                   |
-| 3    | Owner, box user                                                                              | Claude sign-in, and GitHub sign-in when there are repos                                                                                                                                                                          |
-| 4    | Operator, box user. On the Obsidian route, then the owner's box-user session on their laptop | `03-repos.sh` clones the repos and installs their dependencies. On the Obsidian route, `optional/obsidian-sync.sh` installs Obsidian's client, stops for the owner's Obsidian sign-in, then links each vault and starts its sync |
-| 5    | Owner's laptop                                                                               | `laptop/push.sh` copies the Claude Code config, the chosen connectors and the git identity. Then the copy lines for env files, folders with no remote and each vault's `.claude` folder                                          |
-| 6    | Owner, then operator, box user                                                               | Connector sign-ins. Then the trust step for each repo and vault                                                                                                                                                                  |
-| 7    | Operator, box user                                                                           | `05-remote-control.sh` starts a Remote Control server per repo and vault                                                                                                                                                         |
-| 8    | Owner, phone                                                                                 | Try it out, then end each startup session. On the Obsidian route, check a note crosses both ways between the box and Obsidian on the phone                                                                                       |
-| 9    | Operator, root, with the owner's laptop                                                      | `02-tailscale-lockdown.sh close`. Public SSH closes. This is the last configuration step                                                                                                                                         |
-| 10   | Operator, root                                                                               | `06-handover.sh` removes the operator's key. The operator disconnects and the owner repeats one short operation from the phone                                                                                                   |
+| Step | Who and where                                                                                                                                        | What                                                                                                                                                                                                                             |
+| ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1    | Operator, root                                                                                                                                       | Clone this repo to `/opt/cloud-box`, write `box.env`, run `01-base.sh`. Public SSH is key-only from here, before anything of the owner's reaches the box                                                                         |
+| 2    | Operator, root, then owner                                                                                                                           | `02-tailscale-lockdown.sh up`. The owner signs in to Tailscale and proves two routes in: their laptop to the box user over the tailnet, and root in the provider's web console                                                   |
+| 3    | Owner, box user                                                                                                                                      | Claude sign-in, and GitHub sign-in when there are repos                                                                                                                                                                          |
+| 4    | Operator, box user. On the Obsidian route, then the operator in a box-user session on the owner's laptop, with the owner typing the Obsidian sign-in | `03-repos.sh` clones the repos and installs their dependencies. On the Obsidian route, `optional/obsidian-sync.sh` installs Obsidian's client, stops for the owner's Obsidian sign-in, then links each vault and starts its sync |
+| 5    | Owner's laptop                                                                                                                                       | `laptop/push.sh` copies the Claude Code config, the chosen connectors and the git identity. Then the copy lines for env files, folders with no remote and each vault's `.claude` folder                                          |
+| 6    | Owner, then operator, box user                                                                                                                       | Connector sign-ins. Then the trust step for each repo and vault                                                                                                                                                                  |
+| 7    | Operator, box user                                                                                                                                   | `05-remote-control.sh` starts a Remote Control server per repo and vault                                                                                                                                                         |
+| 8    | Owner, phone                                                                                                                                         | Try it out, then end each startup session. On the Obsidian route, check a note crosses both ways between the box and Obsidian on the phone                                                                                       |
+| 9    | Operator, root, with the owner's laptop                                                                                                              | `02-tailscale-lockdown.sh close`. Public SSH closes. This is the last configuration step                                                                                                                                         |
+| 10   | Operator, root                                                                                                                                       | `06-handover.sh` removes the operator's key. The operator disconnects and the owner repeats one short operation from the phone                                                                                                   |
 
 **Building your own box,** you are both roles and the order changes: run step 9 straight after step 2, then steps 3 to 8 over Tailscale (`ssh <box user>@<box name>`), the Obsidian route's vault step and `.claude` copy included, and skip step 10. The two orders differ because of who can get back in. You are on your own tailnet, so if a connection drops after the close you open another. An operator building for someone else is not on the owner's tailnet, so after the close a dropped session is gone for good, and the rest of the call would move onto keyboard control of the owner's laptop. So for them the close comes last, and the base build has already made public SSH key-only before any of the owner's sign-ins arrive.
 
@@ -125,19 +125,19 @@ With `REPOS` empty it says there is nothing to clone and stops there. Otherwise 
 
 A repo's own tracked `.mcp.json` arrives with its clone. If it reads environment variables, the box needs them too.
 
-**On the Obsidian route,** after `03-repos.sh`, the vault step runs in the owner's box-user session on their own laptop (`ssh <box user>@<box name>`), because Obsidian's client asks there for passwords only the owner types:
+**On the Obsidian route,** after `03-repos.sh`, the vault step runs in a box-user session opened on the owner's laptop (`ssh <box user>@<box name>`), because Obsidian's client asks there for passwords only the owner types. The operator types the commands, under the keyboard control the owner grants on the call. At each prompt for a password, the owner pauses the screen share and types it. Building your own box, you type all of it:
 
 ```bash
 /opt/cloud-box/optional/obsidian-sync.sh    # installs the client, then stops for the sign-in
-ob login                                    # the owner, with the screen share paused
+ob login                                    # the owner types the Obsidian sign-in, screen share paused
 /opt/cloud-box/optional/obsidian-sync.sh    # links each vault and starts its sync
 ```
 
-The Obsidian sign-in is here and not with step 3's because the client isn't on the box until the script installs it. `ob login` asks for the owner's Obsidian email, password and any 2FA code. On the second run, a vault with end-to-end encryption asks for its encryption password, which the owner types with the share paused. A vault with standard encryption asks for nothing.
+The Obsidian sign-in is here and not with step 3's because the client isn't on the box until the script installs it. `ob login` asks for the owner's Obsidian email, password and any 2FA code, which the owner types with the share paused. On the second run, a vault with end-to-end encryption asks for its encryption password, which the owner types the same way. A vault with standard encryption asks for nothing.
 
 The script links each vault in `VAULTS` to its remote vault once, under the device name "Cloud box", creating `~/Workspace/<vault dir>` if it isn't there. It then starts a systemd user unit, `obsidian-sync@<vault dir>.service`, which keeps the folder in two-way sync and comes back after a reboot, and checks each one stayed up. If one didn't, it names the cause it can see in the journal: the Sync subscription, a remote vault that no longer exists, a missing encryption key, a second sync of the same vault or the sign-in. It stops before linking anything, naming the fix, for a vault name the account doesn't have, a name two vaults share (it lists their IDs: put the right one in `VAULTS`), two entries that are the same vault, a vault or folder already linked elsewhere, and a vault dir in `REPOS` that `03-repos.sh` hasn't cloned yet. It never unlinks anything itself. Run again, it restarts only what changed: a new link, a new pin in the script (which reinstalls the client), a changed unit file, a sync that isn't running, and a sync that started before the owner last signed in to Obsidian. A run that stops part-way leaves those restarts to the next run.
 
-If Obsidian refuses the stored sign-in, `ob login` stops on it before asking for anything, so the owner runs `ob logout` first and then `ob login`. More in [Obsidian vaults](#obsidian-vaults).
+If Obsidian refuses the stored sign-in, `ob login` stops on it before asking for anything, so the operator runs `ob logout` first and then `ob login`, and the owner types the sign-in again. More in [Obsidian vaults](#obsidian-vaults).
 
 ### 5. Config, connectors and files (owner's laptop)
 
@@ -228,7 +228,7 @@ If the operator's root session was lost after the close, the owner runs it inste
 - Before the call: order the server with the operator's key, sign up for Tailscale and install it on the laptop, check the Claude plan (and the Remote Control toggle on a Team or Enterprise plan), install the Claude app on the phone. On the Obsidian route: check the Obsidian Sync plan, install Obsidian on the phone and copy each vault folder on the laptop as a backup
 - Step 2: sign in to Tailscale from the link, connect once from the laptop, set root's password and sign in to the provider's console as root
 - Step 3: the Claude sign-in (screen share paused) and, for repos, the GitHub device code
-- Step 4, on the Obsidian route: in their box-user session on the laptop, `ob login` and then each end-to-end encrypted vault's password (screen share paused for both)
+- Step 4, on the Obsidian route: the Obsidian email, password and any 2FA code when `ob login` asks, then each end-to-end encrypted vault's password when the script asks (screen share paused for both). The operator types the commands, under keyboard control
 - Step 5: run `push.sh` on the laptop, or hand over keyboard control to run it, and answer `yes` to what it will send
 - Step 6: each connector's sign-in
 - Step 8: the checks from the phone
@@ -260,7 +260,7 @@ Every Remote Control server opens one session in its repo or vault each time it 
 
 ## Adding a repo or a vault later
 
-As root, add it to `REPOS` or `VAULTS` (and `RC_REPOS`, if that is set) in `/opt/cloud-box/box.env`. Then, as the box user: for a repo, `03-repos.sh`. For a vault, `optional/obsidian-sync.sh` in the owner's box-user session on their laptop, which links only the new vault and starts its sync, then its `.claude` copy line from step 5. Then the trust step for the new repo or vault, and `05-remote-control.sh`. The servers and syncs already running are left alone. For an owner who doesn't use a terminal, this is a job for a helper under keyboard control (see below).
+As root, add it to `REPOS` or `VAULTS` (and `RC_REPOS`, if that is set) in `/opt/cloud-box/box.env`. Then, as the box user: for a repo, `03-repos.sh`. For a vault, `optional/obsidian-sync.sh` in a box-user session on the owner's laptop, where the owner can type an end-to-end encrypted vault's password. It links only the new vault and starts its sync. Then its `.claude` copy line from step 5. Then the trust step for the new repo or vault, and `05-remote-control.sh`. The servers and syncs already running are left alone. For an owner who doesn't use a terminal, this is a job for a helper under keyboard control (see below).
 
 ## If a setup is interrupted
 
@@ -271,7 +271,7 @@ One rule wherever a setup stops: if the owner's laptop has reached the box over 
 - **After step 1:** public SSH is key-only, the operator's key is on the box user, and nothing of the owner's is on the box
 - **After step 2:** Tailscale is up on the owner's tailnet, and public SSH is still open, key-only, unless the close has been run
 - **After step 3:** the owner's Claude sign-in, and GitHub's when there are repos, are on the box
-- **After step 4:** the repos are cloned. A repo left at `--clone-only` has no dependencies yet: run `03-repos.sh` again once its env file is in place. On the Obsidian route, `optional/obsidian-sync.sh` stops for the owner's `ob login` and names any vault it can't link. Run it again once that's fixed: a vault already linked is left linked, and its sync is restarted only if something changed
+- **After step 4:** the repos are cloned. A repo left at `--clone-only` has no dependencies yet: run `03-repos.sh` again once its env file is in place. On the Obsidian route, `optional/obsidian-sync.sh` stops for the Obsidian sign-in (`ob login`) and names any vault it can't link. Run it again once that's fixed: a vault already linked is left linked, and its sync is restarted only if something changed
 - **After step 5:** the config, connectors and git identity are on the box. Running `push.sh` again overwrites files of the same name and leaves registered connectors alone
 - **After steps 6 and 7:** any repo whose trust step was missed has no running server. `05-remote-control.sh` names it, and running it again after the trust step starts it
 - **After step 8:** the box is in use
@@ -289,17 +289,17 @@ After the handover, someone helping the owner has no access of their own. The ow
 
 ## Scripts
 
-| Script                                   | Runs as                                          | Needs first                                                          |
-| ---------------------------------------- | ------------------------------------------------ | -------------------------------------------------------------------- |
-| `scripts/01-base.sh`                     | root                                             | `box.env`                                                            |
-| `scripts/02-tailscale-lockdown.sh up`    | root                                             | –                                                                    |
-| `scripts/03-repos.sh`                    | box user                                         | GitHub sign-in, when `REPOS` is set                                  |
-| `optional/obsidian-sync.sh`              | box user, in the owner's session on their laptop | `03-repos.sh`. It stops for the owner's `ob login` when it is needed |
-| `laptop/push.sh`                         | the owner's laptop                               | Tailscale on the laptop                                              |
-| `scripts/04-connectors.sh`               | box user                                         | run by `push.sh`                                                     |
-| `scripts/05-remote-control.sh`           | box user                                         | Claude sign-in, the trust step                                       |
-| `scripts/02-tailscale-lockdown.sh close` | root                                             | the owner's laptop connected over the tailnet                        |
-| `scripts/06-handover.sh`                 | root                                             | a confirmed close                                                    |
+| Script                                   | Runs as                                      | Needs first                                              |
+| ---------------------------------------- | -------------------------------------------- | -------------------------------------------------------- |
+| `scripts/01-base.sh`                     | root                                         | `box.env`                                                |
+| `scripts/02-tailscale-lockdown.sh up`    | root                                         | –                                                        |
+| `scripts/03-repos.sh`                    | box user                                     | GitHub sign-in, when `REPOS` is set                      |
+| `optional/obsidian-sync.sh`              | box user, in a session on the owner's laptop | `03-repos.sh`. It stops for `ob login` when it is needed |
+| `laptop/push.sh`                         | the owner's laptop                           | Tailscale on the laptop                                  |
+| `scripts/04-connectors.sh`               | box user                                     | run by `push.sh`                                         |
+| `scripts/05-remote-control.sh`           | box user                                     | Claude sign-in, the trust step                           |
+| `scripts/02-tailscale-lockdown.sh close` | root                                         | the owner's laptop connected over the tailnet            |
+| `scripts/06-handover.sh`                 | root                                         | a confirmed close                                        |
 
 `scripts/lib.sh` is sourced by the others: it reads and checks the inputs. `tests/run.sh` tests the checks, the laptop script, the vault script and the key and lockdown handling without root, network or a server.
 
