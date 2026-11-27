@@ -31,12 +31,13 @@ unset OBSIDIAN_AUTH_TOKEN
 
 WORKSPACE="$HOME/Workspace"
 UNITS="$HOME/.config/systemd/user"
-# Holds <dir>.started for each vault whose sync has started since its link,
-# the client and the unit file last changed. Each of those changes removes the
-# file first (the whole folder for the client or the unit file, which also
-# covers a dir whose name starts with a dot), so a run that stops before the
-# restart leaves it to the next run.
-STARTED="$HOME/.config/obsidian-sync"
+# Holds <dir>.started, naming the client version, for each vault whose sync
+# has started since its link, the client and the unit file last changed. Each
+# of those changes removes the file first (the whole folder for the client or
+# the unit file, which also covers a dir whose name starts with a dot), so a
+# run that stops before the restart leaves it to the next run. The folder holds
+# nothing else.
+STARTED="$HOME/.config/obsidian-sync/started"
 
 note_stray_units() {
   local u d f
@@ -92,7 +93,7 @@ refused_step="After a refusal, the owner runs ob logout first, then ob login. If
    $login_step"
 if [ -n "$session_token" ]; then
   env_note="OBSIDIAN_AUTH_TOKEN is set in this session, and ob login and ob logout would use it in place of the stored sign-in
-   the syncs need. Unset it first, and take it out of any login file that sets it, or the syncs pick it up too."
+   the syncs need. Unset it first, and take it out of any login file that sets it."
   login_step="$env_note
    $login_step"
   refused_step="$env_note
@@ -216,7 +217,9 @@ for i in "${!VAULT_DIRS[@]}"; do
 done
 
 mkdir -p "$UNITS"
-# bash -lc, because nvm's Node reaches PATH only through ~/.profile.
+# bash -lc, because nvm's Node reaches PATH only through ~/.profile. A login
+# file could also export OBSIDIAN_AUTH_TOKEN, so the unit clears it and uses
+# the stored sign-in this script checked.
 unit_text=$(
   cat <<'UNIT'
 [Unit]
@@ -226,7 +229,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/bin/bash -lc 'exec ob sync --continuous --path %h/Workspace/%i'
+ExecStart=/bin/bash -lc 'unset OBSIDIAN_AUTH_TOKEN; exec ob sync --continuous --path %h/Workspace/%i'
 Restart=always
 RestartSec=30
 
@@ -252,7 +255,7 @@ for dir in "${VAULT_DIRS[@]}"; do
   stamp="$STARTED/$dir.started"
   systemctl --user enable --quiet "$unit"
   why=
-  if [ ! -e "$stamp" ]; then
+  if [ "$(cat "$stamp" 2>/dev/null)" != "$OBSIDIAN_HEADLESS_VERSION" ]; then
     why="it is new, or its link, the client or the unit file changed"
   elif ! systemctl --user is-active --quiet "$unit"; then
     why="it wasn't running"
@@ -270,7 +273,7 @@ for dir in "${VAULT_DIRS[@]}"; do
   fi
   echo "==> $dir: (re)starting its sync – $why"
   systemctl --user restart "$unit"
-  : >"$stamp"
+  printf '%s\n' "$OBSIDIAN_HEADLESS_VERSION" >"$stamp"
   started=1
 done
 
@@ -290,11 +293,12 @@ for i in "${!VAULT_DIRS[@]}"; do
     continue
   fi
   down=1
-  log=$(journalctl --user -u "$unit" -n 30 --no-pager -o cat 2>/dev/null || true)
+  # Its latest start only: an earlier start's cause may no longer hold.
+  log=$(journalctl --user -u "$unit" -I -n 30 --no-pager -o cat 2>/dev/null || true)
   echo "!! $dir: not active" >&2
-  # The latest line that names a cause, since the journal holds earlier starts
-  # too. ob reports the subscription and a deleted vault through its sign-in
-  # error, "Failed to authenticate: <reason>", so those are matched first.
+  # The latest line that names a cause. ob reports the subscription and a
+  # deleted vault through its sign-in error, "Failed to authenticate: <reason>",
+  # so those are matched first.
   cause=$(grep -E 'subscription to Obsidian Sync has expired|no longer exists|Vault not found|Encryption key not found|Another sync instance|No account logged in|Failed to authenticate' <<<"$log" | tail -1 || true)
   case $cause in
     *"subscription to Obsidian Sync has expired"*)
@@ -328,4 +332,4 @@ echo ".obsidian. Copy each vault's .claude folder once, from the owner's laptop 
 for dir in "${VAULT_DIRS[@]}"; do
   echo "  scp -r <vault on the laptop>/.claude $BOX_USER@<box name>:Workspace/$dir/"
 done
-echo "Watch a sync: journalctl --user -u obsidian-sync@<dir> -f"
+echo "Watch a sync: journalctl --user -u obsidian-sync@<dir>.service -f"

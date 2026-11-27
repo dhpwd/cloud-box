@@ -341,8 +341,8 @@ Obsidian's help says to back up a vault before syncing it headless ([obsidian.md
 
 ```bash
 ob sync-status --path ~/Workspace/<vault dir>              # the vault's link and its settings
-journalctl --user -u obsidian-sync@<vault dir> -f          # the sync as it runs
-systemctl --user disable --now obsidian-sync@<vault dir>   # stop the sync
+journalctl --user -u obsidian-sync@<vault dir>.service -f          # the sync as it runs
+systemctl --user disable --now obsidian-sync@<vault dir>.service   # stop the sync
 ob sync-unlink --path ~/Workspace/<vault dir>              # then remove the link and its stored key
 ob logout                                                  # sign the box out of Obsidian
 ```

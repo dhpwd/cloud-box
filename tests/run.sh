@@ -585,7 +585,7 @@ elif ! grep -qx "npm install -g obsidian-headless@$OB_PIN" "$LOG"; then
   bad "obsidian-sync.sh first run installs the pinned client" "$(cat "$LOG")"
 elif [ "$setups" != "ob sync-setup --vault id-notes --path $T/home/Workspace/notes --device-name Cloud box"$'\n'"ob sync-setup --vault id-journal --path $T/home/Workspace/journal --device-name Cloud box" ]; then
   bad "obsidian-sync.sh first run links each vault once, by its resolved ID" "$setups"
-elif [ ! -f "$OB_UNIT" ] || ! grep -qxF "ExecStart=/bin/bash -lc 'exec ob sync --continuous --path %h/Workspace/%i'" "$OB_UNIT"; then
+elif [ ! -f "$OB_UNIT" ] || ! grep -qxF "ExecStart=/bin/bash -lc 'unset OBSIDIAN_AUTH_TOKEN; exec ob sync --continuous --path %h/Workspace/%i'" "$OB_UNIT"; then
   bad "obsidian-sync.sh first run writes the unit" "$(cat "$OB_UNIT" 2>&1)"
 elif ! restarted_each_vault; then
   bad "obsidian-sync.sh first run starts each unit" "$(cat "$LOG")"
@@ -700,6 +700,38 @@ ob_down "obsidian-sync.sh names a refused sign-in with ob logout and ob login" \
   "Failed to authenticate: Invalid token" "After a refusal, the owner runs ob logout first, then ob login"
 ob_down "obsidian-sync.sh names the cause in the latest failed start, not an earlier one" \
   $'Encryption key not found. Run setup again.\nNo account logged in. Run "ob login" first.' "Obsidian is signed out, or refused the stored sign-in"
+
+if grep -q '^journalctl --user -u obsidian-sync@notes.service -I ' "$LOG"; then
+  ok "obsidian-sync.sh reads only a down unit's latest start from the journal"
+else
+  bad "obsidian-sync.sh reads only a down unit's latest start from the journal" "$(cat "$LOG")"
+fi
+
+# A sync that started under an earlier pin restarts, even with the pinned
+# client already installed.
+ob_fixture
+obsync >/dev/null || true
+mkdir -p "$T/home/.config/obsidian-sync/started"
+printf '0.0.0-older\n' >"$T/home/.config/obsidian-sync/started/notes.started"
+: >"$LOG"
+out=$(obsync) && rc=0 || rc=$?
+if [ "$rc" -ne 0 ] || grep -q '^npm install' "$LOG" || [ "$(grep '^systemctl --user restart' "$LOG")" != "systemctl --user restart obsidian-sync@notes.service" ]; then
+  bad "obsidian-sync.sh restarts a sync that started under an earlier pin" "$out"$'\n'"$(cat "$LOG")"
+else
+  ok "obsidian-sync.sh restarts a sync that started under an earlier pin"
+fi
+
+# An install clears the restart records and nothing beside them.
+ob_fixture
+obsync >/dev/null || true
+echo kept >"$T/home/.config/obsidian-sync/other-file"
+echo 0.0.0-older >"$T/ob/version"
+obsync >/dev/null || true
+if [ "$(cat "$T/home/.config/obsidian-sync/other-file" 2>/dev/null)" = kept ]; then
+  ok "obsidian-sync.sh clears only its own restart records"
+else
+  bad "obsidian-sync.sh clears only its own restart records" "$(ls -la "$T/home/.config/obsidian-sync" 2>&1)"
+fi
 
 # A vault dir whose name starts with a dot still restarts after an install.
 ob_fixture
